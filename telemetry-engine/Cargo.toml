@@ -1,0 +1,8 @@
+[package]
+name        = "telemetry-engine"
+version     = "0.1.0"
+edition     = "2021"
+description = "Deterministic IT contract enforcement engine — zero ML, pure invariants"
+
+# Zero external dependencies — stdlib only
+[dependencies]

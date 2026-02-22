@@ -1,0 +1,4 @@
+target/
+public/
+telemetry-engine/dashboard.html
+.vercel/
