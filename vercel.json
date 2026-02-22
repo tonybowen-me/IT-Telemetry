@@ -1,5 +1,5 @@
 {
-  "buildCommand": "curl -sSf https://sh.rustup.rs | sh -s -- -y && . $HOME/.cargo/env && cd telemetry-engine && cargo run && mkdir -p ../public && cp dashboard.html ../public/index.html",
+  "buildCommand": "export PATH=/rust/bin:$PATH && cd telemetry-engine && cargo run && mkdir -p ../public && cp dashboard.html ../public/index.html",
   "outputDirectory": "public",
   "framework": null
 }
