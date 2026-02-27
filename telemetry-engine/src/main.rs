@@ -661,6 +661,45 @@ button:disabled{opacity:.4;cursor:not-allowed}
 #violation-flash{position:fixed;inset:0;background:rgba(255,51,85,0);pointer-events:none;
   transition:background .12s;z-index:100}
 #violation-flash.active{background:rgba(255,51,85,.16)}
+/* Help button */
+#help-btn{border-color:var(--muted);color:var(--muted);padding:0;font-size:.75rem;
+  width:1.85rem;height:1.85rem;border-radius:50%;justify-content:center;flex-shrink:0}
+#help-btn:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+/* Modal */
+#modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:200;
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;pointer-events:none;transition:opacity .2s}
+#modal-overlay.open{opacity:1;pointer-events:all}
+#modal{background:var(--panel);border:1px solid var(--border);border-radius:8px;
+  width:min(680px,90vw);max-height:82vh;display:flex;flex-direction:column;
+  box-shadow:0 24px 64px rgba(0,0,0,.6);transform:translateY(12px);transition:transform .2s}
+#modal-overlay.open #modal{transform:translateY(0)}
+#modal-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;
+  padding:.65rem 1rem;border-bottom:1px solid var(--border);background:var(--surface);
+  border-radius:8px 8px 0 0}
+#modal-title{font-size:.82rem;font-weight:700;color:#e2eaf4;letter-spacing:.02em}
+#modal-close{border:none;background:none;color:var(--muted);font-size:1.1rem;
+  cursor:pointer;padding:.15rem .45rem;border-radius:4px;line-height:1;transition:color .15s}
+#modal-close:hover{color:var(--text)}
+#modal-body{flex:1;overflow-y:auto;padding:1.1rem 1.2rem;font-size:.7rem;
+  line-height:1.7;color:var(--text)}
+#modal-body::-webkit-scrollbar{width:3px}
+#modal-body::-webkit-scrollbar-thumb{background:var(--border)}
+.modal-section{margin-bottom:1rem}
+.modal-section:last-child{margin-bottom:0}
+.modal-h{font-size:.72rem;font-weight:700;color:var(--blue);text-transform:uppercase;
+  letter-spacing:.1em;margin-bottom:.4rem}
+.modal-table{width:100%;border-collapse:collapse;font-size:.67rem;margin-top:.35rem}
+.modal-table td{padding:.28rem .5rem;border:1px solid var(--dim);vertical-align:top}
+.modal-table tr td:first-child{color:var(--muted);background:rgba(0,0,0,.18);
+  white-space:nowrap;font-weight:600}
+.modal-pass{color:var(--green);font-weight:700}
+.modal-fail{color:var(--red);font-weight:700}
+.modal-warn{color:var(--yellow);font-weight:700}
+.modal-chain{display:flex;align-items:center;gap:.5rem;font-size:.78rem;
+  color:var(--muted);margin:.35rem 0}
+.modal-chain .arrow{color:var(--green);font-weight:700}
+.modal-chain .window{font-size:.62rem;color:var(--dim);margin-left:.25rem}
 "#;
 
 // ── JS ────────────────────────────────────────────────────────────────────────
@@ -966,6 +1005,20 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   document.getElementById('reset-btn').style.display = 'none';
   resetAll();
 });
+// Modal
+(function(){
+  const overlay = document.getElementById('modal-overlay');
+  const openModal  = () => overlay.classList.add('open');
+  const closeModal = () => overlay.classList.remove('open');
+  document.getElementById('help-btn').addEventListener('click', openModal);
+  document.getElementById('modal-close').addEventListener('click', closeModal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+  if (!localStorage.getItem('acie_modal_seen')) {
+    openModal();
+    localStorage.setItem('acie_modal_seen', '1');
+  }
+})();
 "#;
 
 // ── HTML ──────────────────────────────────────────────────────────────────────
@@ -998,8 +1051,50 @@ r#"<!DOCTYPE html>
     <button id="play-btn">▶ Play</button>
     <button id="step-btn">⏸ Step Through</button>
     <button id="reset-btn">↺ Reset</button>
+    <button id="help-btn" title="About this demo">?</button>
   </div>
 </header>
+
+<div id="modal-overlay">
+  <div id="modal">
+    <div id="modal-head">
+      <span id="modal-title">Auth Chain Integrity Engine — Overview</span>
+      <button id="modal-close" title="Close">✕</button>
+    </div>
+    <div id="modal-body">
+      <div class="modal-section">
+        <div class="modal-h">What It Is</div>
+        <p>A Rust pipeline that enforces authentication contracts through <strong style="color:var(--blue)">deterministic causal reasoning</strong> — no ML, no probabilistic models, pure logical invariants.</p>
+      </div>
+      <div class="modal-section">
+        <div class="modal-h">The Causal Chain</div>
+        <div class="modal-chain">
+          LoginSuccess <span class="arrow">→</span> AuthTokenIssued <span class="arrow">→</span> AuthTokenUsed
+          <span class="window">· 5-minute freshness window</span>
+        </div>
+        <p style="color:var(--nbody)">Each step must causally follow the prior one within the window. The engine ingests an event stream and asks: did every token use have a valid, recent, complete auth chain behind it?</p>
+      </div>
+      <div class="modal-section">
+        <div class="modal-h">What the Demo Shows</div>
+        <table class="modal-table">
+          <tr><td>alice</td><td>Happy path — full chain within window</td><td><span class="modal-pass">✔ All contracts satisfied</span></td></tr>
+          <tr><td>bob</td><td>Token used with no prior login</td><td><span class="modal-fail">✘ Critical — unauthenticated access</span></td></tr>
+          <tr><td>dave</td><td>Token used 320 s after login (window = 300 s)</td><td><span class="modal-fail">✘ Critical — session expired</span></td></tr>
+          <tr><td>judy</td><td>Login recorded, token never issued before stream ends</td><td><span class="modal-warn">⚠ Warning — deferred obligation unfulfilled</span></td></tr>
+        </table>
+        <p style="color:var(--nbody);margin-top:.5rem">Every violation produces a <strong style="color:var(--text)">deterministic proof</strong>, not a risk score — e.g. <em>"login was 320 s ago, window is 300 s, exceeded by 20 s."</em></p>
+      </div>
+      <div class="modal-section">
+        <div class="modal-h">How to Use the Demo</div>
+        <ul style="margin:.2rem 0 0 1.2rem;color:var(--nbody);font-size:.68rem;line-height:1.9">
+          <li><strong style="color:var(--green)">▶ Play</strong> — steps through all events automatically</li>
+          <li><strong style="color:var(--blue)">⏸ Step Through</strong> — advance one phase at a time with narrator guidance</li>
+          <li><strong style="color:var(--text)">↺ Reset</strong> — clear state and restart from the beginning</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="main-grid">
   <div class="panel">
