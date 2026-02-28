@@ -1,13 +1,17 @@
+mod automation;
 mod control_plane;
 mod engine;
 mod events;
 mod state;
+mod thermal;
 mod variance;
 
+use automation::{AutomationEngine, AutomationState, AutomationStore, VALIDATION_WINDOW};
 use control_plane::{ControlPlaneEngine, ControlPlaneState, ControlPlaneStore, CP_WINDOW};
 use engine::{Engine, WINDOW};
-use events::{ControlPlaneEvent, DomainEvent, Domain, IdentityEvent, Event};
+use events::{AutomationEvent, ControlPlaneEvent, DomainEvent, Domain, IdentityEvent, ThermalEvent, Event};
 use state::{AuthState, StateStore};
+use thermal::{ThermalEngine, ThermalState, ThermalStore, JUSTIFICATION_WINDOW, NOMINAL_TEMP, BIAS_THRESHOLD};
 use variance::Variance;
 
 use std::collections::HashMap;
@@ -54,179 +58,10 @@ struct StepData {
     history:     Vec<(usize, u64, &'static str)>,
 }
 
-// ── Step-through narratives (3 phases per step × 9 steps) ────────────────────
+// ── Step-through narratives (3 phases per step × 5 steps) ────────────────────
 
 static NARRATIVES: &[&[Phase]] = &[
-    // ── Step 1: LoginSuccess(alice, t=0) ──────────────────────────────────────
-    &[
-        ("Event Arrives",
-         "LoginSuccess — alice @ t=0s",
-         "The engine receives its first event: alice has authenticated. \
-          Contract 1 states that every LoginSuccess must eventually be followed \
-          by an AuthTokenIssued. The engine records this login, creates alice's \
-          auth state, and opens a deferred obligation. No invariant fires yet."),
-        ("State Lookup",
-         "Creating alice's auth state",
-         "No prior entry exists for alice. The engine initialises: \
-          logins=[0], token_issued_at=null, token_used=false. \
-          The 5-minute freshness window opens at t=0s and expires at t=300s. \
-          LoginSuccess triggers no immediate check — only a deferred one."),
-        ("Invariant Result",
-         "⏳ Pending — Contract 1 is deferred",
-         "LoginSuccess alone satisfies no invariant immediately. The engine \
-          is not deciding yet — it is watching. Contract 1 will be evaluated \
-          when AuthTokenIssued arrives, or flagged at stream end if it never does."),
-    ],
-    // ── Step 2: AuthTokenIssued(alice, t=10) ─────────────────────────────────
-    &[
-        ("Event Arrives",
-         "AuthTokenIssued — alice @ t=10s",
-         "A token has been issued to alice 10 seconds after login. \
-          This triggers Contract 1's deferred check: the engine must verify \
-          that this issuance is backed by a LoginSuccess within the \
-          5-minute freshness window. The lookup runs now."),
-        ("State Lookup",
-         "Checking alice's login history",
-         "alice.logins = [0]. Last login: t=0s. Elapsed since login: 10s. \
-          Window: 300s. 10 < 300 — the login is fresh. \
-          The engine finds a valid login within the window and confirms \
-          Contract 1. State updated: token_issued_at = 10."),
-        ("Invariant Result",
-         "✔ Pass — token issuance is valid",
-         "Contract 1 confirmed: alice's token was issued 10 seconds after a \
-          valid login. The issuance is legitimate. The engine continues \
-          watching for AuthTokenUsed, which will trigger Contract 2."),
-    ],
-    // ── Step 3: AuthTokenUsed(alice, t=120) ──────────────────────────────────
-    &[
-        ("Event Arrives",
-         "AuthTokenUsed — alice @ t=120s",
-         "alice exercises her token 120 seconds after login. Contract 2 fires: \
-          the engine checks (A) a valid LoginSuccess exists within the window, \
-          and (B) an AuthTokenIssued was previously recorded. \
-          Both checks run simultaneously."),
-        ("State Lookup",
-         "Checking alice's complete auth state",
-         "alice.logins=[0], elapsed=120s < 300s → login valid. \
-          alice.token_issued_at=10 → issuance on record. \
-          Both preconditions of Contract 2 are met. \
-          State updated: token_used=true."),
-        ("Invariant Result",
-         "✔ Pass — full auth chain verified",
-         "Alice's complete authentication chain is confirmed: \
-          Login (t=0) → Token Issued (t=10) → Token Used (t=120). \
-          All events within the 5-minute window, in the correct order. \
-          This is the baseline. Every other scenario deviates from this."),
-    ],
-    // ── Step 4: AuthTokenUsed(bob, t=200) ────────────────────────────────────
-    &[
-        ("Event Arrives",
-         "AuthTokenUsed — bob @ t=200s",
-         "bob attempts to use a token. This is the first event the engine \
-          has ever seen from bob — there is no prior state for this identity. \
-          Contract 2 fires immediately: has bob ever authenticated? \
-          Is there a token issuance on record?"),
-        ("State Lookup",
-         "Looking up bob — no state found",
-         "bob has no entry in the engine's state store. \
-          No LoginSuccess. No AuthTokenIssued. \
-          Yet a token is being exercised. \
-          The engine cannot find a login within any window \
-          because there is no window — there was never a login."),
-        ("Invariant Result",
-         "✘ Critical — token used without authentication",
-         "Hard causal failure: a token was exercised by an identity that \
-          never authenticated. This is not probabilistic — it is a proven \
-          invariant violation. The contract is explicit: AuthTokenUsed \
-          MUST have a prior LoginSuccess. None exists. \
-          In a real deployment: immediate alert, possible credential theft."),
-    ],
-    // ── Step 5: LoginSuccess(dave, t=400) ────────────────────────────────────
-    &[
-        ("Event Arrives",
-         "LoginSuccess — dave @ t=400s",
-         "Scenario 3 begins. dave logs in at t=400s. The engine records this \
-          and opens dave's 5-minute freshness window. \
-          The window runs t=400s → t=700s. \
-          Any AuthTokenUsed arriving after t=700s will violate Contract 2."),
-        ("State Lookup",
-         "Initialising dave's auth state",
-         "dave.logins=[400], token_issued_at=null, token_used=false. \
-          Window: [400s, 700s]. Everything is in order. \
-          The engine records the deferred Contract 1 obligation \
-          and waits for AuthTokenIssued."),
-        ("Invariant Result",
-         "⏳ Pending — window is open",
-         "Same deferred pattern as alice's first event. The engine records \
-          state and waits. Note the critical deadline: t=700s. \
-          The next events will determine whether dave's session \
-          respects the freshness contract."),
-    ],
-    // ── Step 6: AuthTokenIssued(dave, t=401) ─────────────────────────────────
-    &[
-        ("Event Arrives",
-         "AuthTokenIssued — dave @ t=401s",
-         "dave's token is issued one second after login. Contract 1 fires: \
-          was there a LoginSuccess within the 5-minute window? \
-          At t=401s the window is wide open — 299 seconds remain. \
-          The check should pass easily."),
-        ("State Lookup",
-         "dave.last_login=400s, elapsed=1s",
-         "Login was 1 second ago. Window: 300s. 1 < 300 — valid. \
-          Contract 1 satisfied. State: token_issued_at=401. \
-          Notice: the clock is at t=401s. The window closes at t=700s. \
-          If AuthTokenUsed arrives after t=700s, Contract 2 will fail."),
-        ("Invariant Result",
-         "✔ Pass — but the window is closing",
-         "Token issued legitimately. However, the engine has recorded \
-          dave's login at t=400s. When AuthTokenUsed arrives, \
-          the engine recalculates elapsed from t=400s — not from t=401s. \
-          If that event arrives after t=700s, the session is expired."),
-    ],
-    // ── Step 7: AuthTokenUsed(dave, t=720) ───────────────────────────────────
-    &[
-        ("Event Arrives",
-         "AuthTokenUsed — dave @ t=720s",
-         "dave uses his token at t=720s. The window closed at t=700s. \
-          The engine calculates: 720 − 400 = 320s since login. \
-          The window is 300s. Dave is 20 seconds past the deadline. \
-          Contract 2 evaluates now."),
-        ("State Lookup",
-         "dave.last_login=400s, elapsed=320s, window=300s",
-         "320 > 300. The session has expired. The engine does not care \
-          that the token was validly issued at t=401s — what matters is \
-          the age of the LoginSuccess at the moment of token use. \
-          At t=720s, dave's login is stale by exactly 20 seconds."),
-        ("Invariant Result",
-         "✘ Critical — session expired",
-         "Contract 2 violated. Deterministic proof: 720 − 400 = 320 > 300. \
-          The login is outside the freshness window at the time of token use. \
-          This could represent a delayed replay, a stolen long-lived token, \
-          or a client that held a credential past its validity period. \
-          The engine flags it regardless — no interpretation required."),
-    ],
-    // ── Step 8: LoginSuccess(judy, t=900) ────────────────────────────────────
-    &[
-        ("Event Arrives",
-         "LoginSuccess — judy @ t=900s",
-         "Scenario 4 begins. judy logs in. The engine records this and opens \
-          Contract 1's deferred obligation. \
-          No AuthTokenIssued will arrive before the stream ends — \
-          this represents the deferred invariant case: only detectable at finalize."),
-        ("State Lookup",
-         "Initialising judy's auth state",
-         "judy.logins=[900], token_issued_at=null, token_used=false. \
-          Window: [900s, 1200s]. Contract 1 obligation is open. \
-          The engine holds this in memory, awaiting an AuthTokenIssued \
-          that will never come."),
-        ("Invariant Result",
-         "⏳ Pending — stream will end without AuthTokenIssued",
-         "The engine is watching, but this stream ends without a token \
-          issuance for judy. The obligation will only be resolved during \
-          the finalize pass — when the engine audits all open contracts \
-          that could not be evaluated in real-time."),
-    ],
-    // ── Step 9: RoleAssigned(svc_alpha, t=1000) ── ControlPlane domain ───────
+    // ── Step 1: RoleAssigned(svc_alpha, t=1000) ── Scenario A ────────────────
     &[
         ("Event Arrives",
          "RoleAssigned — svc_alpha @ t=1000s",
@@ -246,7 +81,7 @@ static NARRATIVES: &[&[Phase]] = &[
           from svc_alpha. Any such event arriving before t=4600s will be \
           considered authorised. After that, the role is stale."),
     ],
-    // ── Step 10: AdminActionTaken(svc_alpha, t=1030) ─────────────────────────
+    // ── Step 2: AdminActionTaken(svc_alpha, t=1030) ── Scenario A ────────────
     &[
         ("Event Arrives",
          "AdminActionTaken — svc_alpha @ t=1030s",
@@ -261,10 +96,11 @@ static NARRATIVES: &[&[Phase]] = &[
         ("Invariant Result",
          "✔ Pass — admin action is authorised",
          "svc_alpha's action is backed by a valid, recent role assignment. \
-          This is the ControlPlane equivalent of Scenario A: the full \
-          authorisation chain is intact. Role → Action within the window."),
+          This is Scenario A — the legitimate variation: a properly authorised \
+          service account acts within its declared privilege window. \
+          Role assigned → Admin action taken. No invariant violation."),
     ],
-    // ── Step 11: AdminActionTaken(rogue_svc, t=1100) ─────────────────────────
+    // ── Step 3: AdminActionTaken(rogue_svc, t=1100) ── Scenario B ────────────
     &[
         ("Event Arrives",
          "AdminActionTaken — rogue_svc @ t=1100s",
@@ -285,7 +121,7 @@ static NARRATIVES: &[&[Phase]] = &[
           MUST have a prior RoleAssigned. None exists. \
           In a real deployment: immediate alert, lateral movement suspected."),
     ],
-    // ── Step 12: RoleAssigned(svc_beta, t=1200) ──────────────────────────────
+    // ── Step 4: RoleAssigned(svc_beta, t=1200) ── Scenario B ─────────────────
     &[
         ("Event Arrives",
          "RoleAssigned — svc_beta @ t=1200s",
@@ -303,7 +139,7 @@ static NARRATIVES: &[&[Phase]] = &[
           The next AdminActionTaken from svc_beta will be the deciding moment. \
           If it arrives after t=4800s, Contract CP-2 will fail — expired role."),
     ],
-    // ── Step 13: AdminActionTaken(svc_beta, t=5000) ──────────────────────────
+    // ── Step 5: AdminActionTaken(svc_beta, t=5000) ── Scenario B ─────────────
     &[
         ("Event Arrives",
          "AdminActionTaken — svc_beta @ t=5000s",
@@ -324,27 +160,211 @@ static NARRATIVES: &[&[Phase]] = &[
           This could represent a delayed execution, a stale credential being replayed, \
           or a service that held an elevated role past its intended validity period."),
     ],
-    // ── Step 14: FINALIZE(judy) ───────────────────────────────────────────────
+    // ── Step 6: WorkloadScheduled(rack_a, t=6000) ── Scenario C ──────────────
     &[
-        ("Stream End",
-         "FINALIZE — the event stream has ended",
-         "No more events will arrive. The engine now runs its deferred \
-          contract scan, iterating every identity that holds an open \
-          Contract 1 obligation: a LoginSuccess with no AuthTokenIssued \
-          before stream end. judy is the only such identity."),
-        ("Deferred Check",
-         "judy: login recorded, no token ever issued",
-         "judy.logins=[900], token_issued_at=null, token_used=false. \
-          The stream is over. judy authenticated but received no token. \
-          Contract 1's obligation is unfulfilled. \
-          The engine emits a deferred Warning variance."),
+        ("Event Arrives",
+         "WorkloadScheduled — rack_a @ t=6000s",
+         "Scenario C begins: the Thermal engine receives a workload declaration for rack_a. \
+          Contract TH-1 states that any sustained thermal bias must be causally attributable \
+          to a declared workload. This declaration opens a 30-minute justification window. \
+          Any thermal reading above threshold within that window will be considered justified."),
+        ("State Lookup",
+         "Creating rack_a's thermal state",
+         "No prior entry exists for rack_a. The engine initialises: \
+          last_workload_at=6000, bias_count=0, last_temp=null. \
+          The justification window runs t=6000s → t=7800s. \
+          WorkloadScheduled triggers no immediate contract check."),
         ("Invariant Result",
-         "⚠ Warning — login without token issuance",
-         "Contract 1 deferred violation: judy's login was never followed \
-          by AuthTokenIssued before the stream closed. \
-          Possible causes: abandoned session, failure in the token issuance \
-          pipeline, or a login that was intercepted before completion. \
-          The engine cannot determine cause — only that the contract was not satisfied."),
+         "⏳ Pending — justification window is open",
+         "The workload is declared. The engine now watches for ThermalReading events \
+          from rack_a. Any reading above the 50°C threshold (nominal 45 + bias 5) \
+          within the next 1800 seconds will be treated as causally justified. \
+          After t=7800s, the justification expires."),
+    ],
+    // ── Step 7: ThermalReading(rack_a, 52°C, t=6300) ── Scenario C ───────────
+    &[
+        ("Event Arrives",
+         "ThermalReading — rack_a @ t=6300s, 52°C",
+         "rack_a reports 52°C — 7°C above nominal (45°C) and above the 50°C threshold. \
+          This is a biased reading. Contract TH-1 fires: the engine checks whether \
+          a WorkloadScheduled exists within the 30-minute justification window."),
+        ("State Lookup",
+         "Checking rack_a's workload justification",
+         "rack_a.last_workload_at=6000. Elapsed since declaration: 300s. \
+          Window: 1800s. 300 < 1800 — the workload is current. \
+          temp=52°C > threshold (50°C) — biased, but justified. \
+          Contract TH-1 is satisfied. This is the expected outcome for a legitimately loaded rack."),
+        ("Invariant Result",
+         "✔ Pass — thermal bias is causally justified",
+         "rack_a's elevated temperature is explained by the declared workload. \
+          This is the Scenario C baseline: bias is permitted when justified. \
+          The engine does not flag this reading. \
+          Now watch what happens when rack_b — with no declared workload — also runs hot."),
+    ],
+    // ── Step 8: ThermalReading(rack_b, 56°C, t=6600) ── Scenario C ───────────
+    &[
+        ("Event Arrives",
+         "ThermalReading — rack_b @ t=6600s, 56°C",
+         "rack_b reports 56°C. This is the first event the engine has ever seen from rack_b. \
+          temp=56°C is 11°C above nominal and 6°C above the 50°C threshold — clearly biased. \
+          Contract TH-1 fires: has rack_b declared a workload within the justification window?"),
+        ("State Lookup",
+         "Looking up rack_b — no workload on record",
+         "rack_b has no entry in the thermal state store. No WorkloadScheduled. \
+          No justification for the elevated temperature whatsoever. \
+          Yet rack_b is running 11°C above nominal. \
+          This is the silent scheduler bias pattern: heat without declared cause."),
+        ("Invariant Result",
+         "⚠ Warning — unjustified thermal bias (first detection)",
+         "Contract TH-1 partially violated. bias_count=1. \
+          rack_b's temperature exceeds threshold with no workload justification on record. \
+          The engine flags this as a Warning — the first occurrence is insufficient \
+          to confirm sustained bias. The engine continues watching for further readings."),
+    ],
+    // ── Step 9: ThermalReading(rack_b, 61°C, t=7200) ── Scenario C ───────────
+    &[
+        ("Event Arrives",
+         "ThermalReading — rack_b @ t=7200s, 61°C",
+         "rack_b reports 61°C — now 16°C above nominal. Still no WorkloadScheduled \
+          for rack_b has arrived. The engine rechecks Contract TH-1: \
+          same entity, same pattern, escalating temperature. bias_count is now 2."),
+        ("State Lookup",
+         "rack_b.last_workload=NONE, temp=61°C, bias_count → 2",
+         "600 seconds have passed since the first biased reading. \
+          No workload has been declared for rack_b. \
+          temp=61°C > 50°C threshold. bias_count increments to 2. \
+          Two consecutive unjustified readings cross the sustained bias threshold."),
+        ("Invariant Result",
+         "✘ Critical — sustained equilibrium invariant violated",
+         "Contract TH-2 violated. Deterministic proof: 2 consecutive ThermalReadings \
+          above threshold with no WorkloadScheduled justification. \
+          This is not a spike — it is a sustained pattern. \
+          In a real deployment: immediate escalation, scheduler audit required."),
+    ],
+    // ── Step 10: ThermalReading(rack_b, 64°C, t=7800) ── Scenario C ──────────
+    &[
+        ("Event Arrives",
+         "ThermalReading — rack_b @ t=7800s, 64°C",
+         "rack_b reaches 64°C — 19°C above nominal. The temperature is still rising. \
+          Still no workload declaration. The engine applies Contract TH-2 again: \
+          this is the third consecutive unjustified reading. The bias is definitive."),
+        ("State Lookup",
+         "rack_b.last_workload=NONE, temp=64°C, bias_count → 3",
+         "rack_b has now produced 3 consecutive ThermalReadings above the 50°C threshold \
+          with zero workload justification. The scheduler has silently biased load \
+          onto rack_b without declaring any intent. \
+          The causal chain is broken: thermal impact without declared digital cause."),
+        ("Invariant Result",
+         "✘ Critical — silent scheduler bias proven",
+         "Contract TH-2 confirmed: sustained asymmetric thermal bias without declared workload. \
+          3 readings (56°C → 61°C → 64°C), no WorkloadScheduled, no justification. \
+          Every detection is a deterministic causal proof — the engine did not guess. \
+          It observed a broken causal chain and reported it."),
+    ],
+    // ── Step 11: StateValidated(orchestrator, t=9000) ── Scenario D ──────────
+    &[
+        ("Event Arrives",
+         "StateValidated — orchestrator @ t=9000s",
+         "Scenario D begins: the Automation engine receives a state validation event. \
+          Mother has audited system state and confirmed coherence. \
+          Contract AUTO-1 states that every AutomationTriggered must be backed by a \
+          StateValidated within a 5-minute window. This validation opens that window."),
+        ("State Lookup",
+         "Creating orchestrator's automation state",
+         "No prior entry exists for orchestrator. The engine initialises: \
+          last_validated_at=9000, trigger_count=0, last_trigger_at=null. \
+          The validation window runs t=9000s → t=9300s. \
+          StateValidated triggers no immediate contract check."),
+        ("Invariant Result",
+         "⏳ Pending — validation window is open",
+         "System state is confirmed coherent. The engine is now watching for \
+          AutomationTriggered events from orchestrator. Any trigger arriving \
+          before t=9300s is considered to be acting on validated state. \
+          After t=9300s, the validation expires and any trigger becomes unjustified."),
+    ],
+    // ── Step 12: AutomationTriggered(orchestrator, t=9100) ── Scenario D ─────
+    &[
+        ("Event Arrives",
+         "AutomationTriggered — orchestrator @ t=9100s",
+         "Mother triggers a remediation action 100 seconds after state validation. \
+          Contract AUTO-1 fires: is there a StateValidated within the 5-minute window? \
+          At t=9100s the window is open — 200 seconds remain. The check runs now."),
+        ("State Lookup",
+         "Checking orchestrator's validation state",
+         "orchestrator.last_validated_at=9000. Elapsed since validation: 100s. \
+          Window: 300s. 100 < 300 — validation is fresh. trigger_count stays at 0. \
+          This trigger is causally justified by the preceding state validation."),
+        ("Invariant Result",
+         "✔ Pass — automation is acting on validated state",
+         "Contract AUTO-1 satisfied: Mother's remediation is backed by a valid, \
+          recent state validation. This is the expected pattern — automation \
+          acting on confirmed, coherent state. \
+          Now watch what happens after the validation window expires."),
+    ],
+    // ── Step 13: AutomationTriggered(orchestrator, t=9400) ── Scenario D ─────
+    &[
+        ("Event Arrives",
+         "AutomationTriggered — orchestrator @ t=9400s",
+         "Mother triggers again at t=9400s. The last validation was at t=9000s — \
+          400 seconds ago. The window is 300 seconds. \
+          The validation has expired. No new StateValidated has arrived. \
+          Contract AUTO-1 fires: is this trigger justified?"),
+        ("State Lookup",
+         "orchestrator.last_validated=9000s, elapsed=400s, window=300s",
+         "400 > 300. The validation has expired by 100 seconds. \
+          No StateValidated has arrived since t=9000s, yet automation is still firing. \
+          trigger_count → 1 (first stale trigger). \
+          The previous remediation did not resolve the underlying issue."),
+        ("Invariant Result",
+         "⚠ Warning — automation acting on stale state",
+         "Contract AUTO-1 partially violated. trigger_count=1. \
+          Mother is triggering remediation on system state that has not been \
+          re-validated since t=9000s. The first occurrence is flagged as a Warning. \
+          The engine continues watching: will state be re-validated, or will \
+          the automation keep firing into the void?"),
+    ],
+    // ── Step 14: AutomationTriggered(orchestrator, t=9600) ── Scenario D ─────
+    &[
+        ("Event Arrives",
+         "AutomationTriggered — orchestrator @ t=9600s",
+         "Mother triggers a third time at t=9600s. Still no StateValidated \
+          since t=9000s — now 600 seconds ago, twice the window. \
+          trigger_count → 2. Contract AUTO-2 fires: this is a cascade."),
+        ("State Lookup",
+         "orchestrator.last_validated=9000s, elapsed=600s, trigger_count → 2",
+         "600 > 300. Validation expired 300 seconds ago. \
+          Two consecutive triggers on unvalidated state. \
+          The underlying deviation has not been resolved by prior remediations. \
+          Mother is not correcting the problem — it is amplifying it."),
+        ("Invariant Result",
+         "✘ Critical — automation cascade detected",
+         "Contract AUTO-2 violated. Deterministic proof: 2 consecutive AutomationTriggered \
+          events on state that has not been re-validated. \
+          This is the automation amplification pattern: the AI is reacting to \
+          manipulated or incoherent telemetry, repeatedly, without confirmation \
+          that its actions are having any effect."),
+    ],
+    // ── Step 15: AutomationTriggered(orchestrator, t=9900) ── Scenario D ─────
+    &[
+        ("Event Arrives",
+         "AutomationTriggered — orchestrator @ t=9900s",
+         "Mother triggers a fourth time at t=9900s. 900 seconds since last validation — \
+          three times the window. trigger_count → 3. \
+          The automation has now fired four times on unvalidated state, \
+          with zero re-validation in between. The pattern is definitive."),
+        ("State Lookup",
+         "orchestrator.last_validated=9000s, elapsed=900s, trigger_count → 3",
+         "900 > 300. 3 consecutive triggers on expired state. \
+          No StateValidated has arrived. No evidence that any prior remediation \
+          resolved the underlying issue. The automation is in a feedback loop, \
+          amplifying an unresolved deviation with each successive trigger."),
+        ("Invariant Result",
+         "✘ Critical — automation amplification proven",
+         "Contract AUTO-2 confirmed: sustained automation triggering on unvalidated state. \
+          4 triggers, 1 validation — Mother is reacting to incoherent telemetry. \
+          In a real deployment: halt signal required, human escalation mandatory. \
+          Every detection is a deterministic causal proof — not a probability, \
+          not a heuristic, not a model score. A broken causal chain."),
     ],
 ];
 
@@ -360,8 +380,10 @@ fn js_str(s: &str) -> String {
 }
 
 fn snapshot(
-    id_store:  &StateStore,
-    cp_store:  &ControlPlaneStore,
+    id_store:   &StateStore,
+    cp_store:   &ControlPlaneStore,
+    th_store:   &ThermalStore,
+    au_store:   &AutomationStore,
     current_ts: u64,
 ) -> Vec<(String, EntityState)> {
     let mut out: Vec<(String, EntityState)> = Vec::new();
@@ -414,6 +436,71 @@ fn snapshot(
         }));
     }
 
+    // Thermal entities
+    for (entity, s) in th_store {
+        let wl_in_win = s.workload_within(current_ts, JUSTIFICATION_WINDOW).is_some();
+        let is_biased = s.last_temp.map(|t| t > NOMINAL_TEMP + BIAS_THRESHOLD).unwrap_or(false);
+        out.push((entity.clone(), EntityState {
+            domain: "Thermal",
+            fields: vec![
+                (
+                    "last_workload_at".into(),
+                    s.last_workload_at
+                        .map(|t| format!("t={}s{}", t, if !wl_in_win { " ⚠" } else { "" }))
+                        .unwrap_or_else(|| "—".into()),
+                    if s.last_workload_at.is_none() { "none" }
+                    else if wl_in_win { "ok" }
+                    else { "fail" }.into(),
+                ),
+                (
+                    "last_temp".into(),
+                    s.last_temp.map(|t| format!("{}°C", t)).unwrap_or_else(|| "—".into()),
+                    if s.last_temp.is_none() { "none" }
+                    else if is_biased { "fail" }
+                    else { "ok" }.into(),
+                ),
+                (
+                    "bias_count".into(),
+                    s.bias_count.to_string(),
+                    if s.bias_count == 0 { "ok" }
+                    else if s.bias_count == 1 { "warn" }
+                    else { "fail" }.into(),
+                ),
+            ],
+        }));
+    }
+
+    // Automation entities
+    for (entity, s) in au_store {
+        let val_in_win = s.validation_within(current_ts, VALIDATION_WINDOW).is_some();
+        out.push((entity.clone(), EntityState {
+            domain: "Automation",
+            fields: vec![
+                (
+                    "last_validated_at".into(),
+                    s.last_validated_at
+                        .map(|t| format!("t={}s{}", t, if !val_in_win { " ⚠" } else { "" }))
+                        .unwrap_or_else(|| "—".into()),
+                    if s.last_validated_at.is_none() { "none" }
+                    else if val_in_win { "ok" }
+                    else { "fail" }.into(),
+                ),
+                (
+                    "trigger_count".into(),
+                    s.trigger_count.to_string(),
+                    if s.trigger_count == 0 { "ok" }
+                    else if s.trigger_count == 1 { "warn" }
+                    else { "fail" }.into(),
+                ),
+                (
+                    "last_trigger_at".into(),
+                    s.last_trigger_at.map(|t| format!("t={}s", t)).unwrap_or_else(|| "—".into()),
+                    if s.last_trigger_at.is_some() { "neutral" } else { "none" }.into(),
+                ),
+            ],
+        }));
+    }
+
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
@@ -422,10 +509,179 @@ fn compute_check(
     ev:     &Event,
     id_pre: Option<&AuthState>,
     cp_pre: Option<&ControlPlaneState>,
+    th_pre: Option<&ThermalState>,
+    au_pre: Option<&AutomationState>,
 ) -> CheckInfo {
     match &ev.kind {
-        DomainEvent::Identity(_)     => compute_identity_check(ev, id_pre),
-        DomainEvent::ControlPlane(_) => compute_cp_check(ev, cp_pre),
+        DomainEvent::Identity(_)    => compute_identity_check(ev, id_pre),
+        DomainEvent::ControlPlane(_)=> compute_cp_check(ev, cp_pre),
+        DomainEvent::Thermal(_)     => compute_thermal_check(ev, th_pre),
+        DomainEvent::Automation(_)  => compute_automation_check(ev, au_pre),
+    }
+}
+
+fn compute_automation_check(ev: &Event, pre: Option<&AutomationState>) -> CheckInfo {
+    match &ev.kind {
+        DomainEvent::Automation(AutomationEvent::StateValidated) => CheckInfo {
+            rule: "Contract AUTO-1 — StateValidated(entity) · validation window opens".to_string(),
+            lookup: vec![
+                ("entity".into(),  ev.entity.to_string(),                                  "neutral".into()),
+                ("event".into(),   format!("StateValidated @ t={}s", ev.ts),               "neutral".into()),
+                ("action".into(),  "Validation timestamp recorded, trigger_count reset".to_string(), "ok".into()),
+                ("window".into(),  format!("automation justified for {}s from now", VALIDATION_WINDOW), "neutral".into()),
+            ],
+            result:        "pending",
+            result_text:   "⏳ PENDING".to_string(),
+            result_detail: "State validated — any AutomationTriggered within the next 5 minutes is considered justified".to_string(),
+        },
+
+        DomainEvent::Automation(AutomationEvent::AutomationTriggered) => {
+            let val_at    = pre.and_then(|s| s.last_validated_at);
+            let justified = pre.map(|s| s.validation_within(ev.ts, VALIDATION_WINDOW).is_some()).unwrap_or(false);
+            let count     = pre.map(|s| s.trigger_count).unwrap_or(0); // count before this trigger
+
+            let mut lookup = vec![
+                ("entity".into(), ev.entity.to_string(),                          "neutral".into()),
+                ("event".into(),  format!("AutomationTriggered @ t={}s", ev.ts), "neutral".into()),
+            ];
+
+            match val_at {
+                None => {
+                    lookup.push(("last_validated".into(), "NONE".into(), "fail".into()));
+                    lookup.push(("justified?".into(),     "NO — no StateValidated on record".into(), "fail".into()));
+                }
+                Some(t) => {
+                    let elapsed = ev.ts.saturating_sub(t);
+                    lookup.push(("last_validated".into(), format!("t={}s", t), "neutral".into()));
+                    lookup.push(("elapsed".into(),        format!("{}s", elapsed), if elapsed <= VALIDATION_WINDOW { "ok".into() } else { "fail".into() }));
+                    lookup.push(("window".into(),         format!("{}s", VALIDATION_WINDOW), "neutral".into()));
+                    lookup.push(("justified?".into(),
+                        if justified { "YES — within window".into() }
+                        else { format!("NO — validation expired {}s ago", elapsed - VALIDATION_WINDOW) },
+                        if justified { "ok".into() } else { "fail".into() }
+                    ));
+                }
+            }
+
+            if justified {
+                CheckInfo {
+                    rule:          "Contract AUTO-1 — AutomationTriggered backed by fresh StateValidated".to_string(),
+                    lookup,
+                    result:        "pass",
+                    result_text:   "✔ PASS".to_string(),
+                    result_detail: format!("Automation is acting on validated state — trigger is causally justified"),
+                }
+            } else {
+                let next_count = count + 1;
+                if next_count == 1 {
+                    lookup.push(("trigger_count".into(), "1 (first stale trigger)".into(), "warn".into()));
+                    CheckInfo {
+                        rule:          "Contract AUTO-1 — AutomationTriggered must be backed by StateValidated within 5-min window".to_string(),
+                        lookup,
+                        result:        "warn",
+                        result_text:   "⚠ CONTRACT WARNING".to_string(),
+                        result_detail: format!("'{}': automation fired on unvalidated state — monitoring for cascade", ev.entity),
+                    }
+                } else {
+                    lookup.push(("trigger_count".into(), format!("{} (cascade)", next_count), "fail".into()));
+                    CheckInfo {
+                        rule:          "Contract AUTO-2 — Repeated automation on unvalidated state — amplification invariant violated".to_string(),
+                        lookup,
+                        result:        "fail",
+                        result_text:   "✘ CONTRACT VIOLATED".to_string(),
+                        result_detail: format!("'{}': {} consecutive triggers without StateValidated — automation is amplifying unresolved deviation", ev.entity, next_count),
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn compute_thermal_check(ev: &Event, pre: Option<&ThermalState>) -> CheckInfo {
+    match &ev.kind {
+        DomainEvent::Thermal(ThermalEvent::WorkloadScheduled) => CheckInfo {
+            rule: "Contract TH-1 — WorkloadScheduled(rack) · justification window opens".to_string(),
+            lookup: vec![
+                ("entity".into(),  ev.entity.to_string(),                               "neutral".into()),
+                ("event".into(),   format!("WorkloadScheduled @ t={}s", ev.ts),          "neutral".into()),
+                ("action".into(),  "Workload timestamp recorded to state".to_string(),   "ok".into()),
+                ("window".into(),  format!("justification valid for {}s", JUSTIFICATION_WINDOW), "neutral".into()),
+            ],
+            result:        "pending",
+            result_text:   "⏳ PENDING".to_string(),
+            result_detail: "Workload declared — any ThermalReading above threshold within 30 min is now justified".to_string(),
+        },
+
+        DomainEvent::Thermal(ThermalEvent::ThermalReading(temp)) => {
+            let threshold    = NOMINAL_TEMP + BIAS_THRESHOLD;
+            let is_biased    = *temp > threshold;
+            let wl_at        = pre.and_then(|s| s.last_workload_at);
+            let justified    = pre.map(|s| s.workload_within(ev.ts, JUSTIFICATION_WINDOW).is_some()).unwrap_or(false);
+            let bias_count   = pre.map(|s| s.bias_count).unwrap_or(0);
+
+            let mut lookup = vec![
+                ("entity".into(),    ev.entity.to_string(),                         "neutral".into()),
+                ("event".into(),     format!("ThermalReading @ t={}s", ev.ts),       "neutral".into()),
+                ("temp".into(),      format!("{}°C", temp),                          if is_biased { "fail".into() } else { "ok".into() }),
+                ("threshold".into(), format!("{}°C (nominal {} + bias {})", threshold, NOMINAL_TEMP, BIAS_THRESHOLD), "neutral".into()),
+                ("biased?".into(),   if is_biased { "YES".into() } else { "NO".into() }, if is_biased { "fail".into() } else { "ok".into() }),
+            ];
+
+            match wl_at {
+                None => {
+                    lookup.push(("last_workload".into(), "NONE".into(), "none".into()));
+                    lookup.push(("justified?".into(),    "NO — no workload declared".into(), "fail".into()));
+                }
+                Some(t) => {
+                    let elapsed = ev.ts.saturating_sub(t);
+                    lookup.push(("last_workload".into(), format!("t={}s", t), "neutral".into()));
+                    lookup.push(("elapsed".into(),       format!("{}s", elapsed), if elapsed <= JUSTIFICATION_WINDOW { "ok".into() } else { "fail".into() }));
+                    lookup.push(("justified?".into(),
+                        if justified { "YES — within window".into() }
+                        else { format!("NO — workload expired {}s ago", elapsed - JUSTIFICATION_WINDOW) },
+                        if justified { "ok".into() } else { "fail".into() }
+                    ));
+                }
+            }
+
+            if !is_biased || justified {
+                CheckInfo {
+                    rule:          "Contract TH-1 — ThermalReading within justified limits".to_string(),
+                    lookup,
+                    result:        "pass",
+                    result_text:   "✔ PASS".to_string(),
+                    result_detail: if !is_biased {
+                        format!("temp={}°C is within nominal range — no thermal bias", temp)
+                    } else {
+                        format!("temp={}°C exceeds threshold but workload declared {}s ago — justified", temp,
+                            ev.ts.saturating_sub(wl_at.unwrap_or(0)))
+                    },
+                }
+            } else {
+                let next_count = bias_count + 1;
+                if next_count == 1 {
+                    lookup.push(("bias_count".into(), "1 (first occurrence)".into(), "warn".into()));
+                    CheckInfo {
+                        rule:          "Contract TH-1 — ThermalReading bias must be justified by WorkloadScheduled".to_string(),
+                        lookup,
+                        result:        "warn",
+                        result_text:   "⚠ CONTRACT WARNING".to_string(),
+                        result_detail: format!("'{}': temp={}°C exceeds threshold with no workload justification — monitoring for sustained bias", ev.entity, temp),
+                    }
+                } else {
+                    lookup.push(("bias_count".into(), format!("{} (sustained)", next_count), "fail".into()));
+                    CheckInfo {
+                        rule:          "Contract TH-2 — Sustained unjustified thermal bias — equilibrium invariant violated".to_string(),
+                        lookup,
+                        result:        "fail",
+                        result_text:   "✘ CONTRACT VIOLATED".to_string(),
+                        result_detail: format!("'{}': {} consecutive readings above threshold ({}°C) — no workload justification found", ev.entity, next_count, temp),
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -588,28 +844,34 @@ fn compute_cp_check(ev: &Event, pre: Option<&ControlPlaneState>) -> CheckInfo {
 // ── Scenario ──────────────────────────────────────────────────────────────────
 
 fn run_scenario() -> Vec<StepData> {
-    let mut engine       = Engine::new();
-    let mut cp_engine    = ControlPlaneEngine::new();
-    let mut steps        = Vec::new();
-    let mut seq          = 0usize;
+    let mut engine            = Engine::new();
+    let mut cp_engine         = ControlPlaneEngine::new();
+    let mut thermal_engine    = ThermalEngine::new();
+    let mut automation_engine = AutomationEngine::new();
+    let mut steps             = Vec::new();
+    let mut seq               = 0usize;
     let mut user_history: HashMap<String, Vec<(usize, u64, &'static str)>> = HashMap::new();
 
     let script: Vec<(&str, &str, u64, &'static str, DomainEvent)> = vec![
-        // ── Identity domain — Scenario A (baseline) + violation cases ────────
-        ("alice",     "Scenario A — Legitimate Variation",  0,    "alice",     DomainEvent::Identity(IdentityEvent::LoginSuccess)),
-        ("alice",     "Scenario A — Legitimate Variation",  10,   "alice",     DomainEvent::Identity(IdentityEvent::AuthTokenIssued)),
-        ("alice",     "Scenario A — Legitimate Variation",  120,  "alice",     DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
-        ("bob",       "Scenario 2 — Token Without Login",   200,  "bob",       DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
-        ("dave",      "Scenario 3 — Session Expired",       400,  "dave",      DomainEvent::Identity(IdentityEvent::LoginSuccess)),
-        ("dave",      "Scenario 3 — Session Expired",       401,  "dave",      DomainEvent::Identity(IdentityEvent::AuthTokenIssued)),
-        ("dave",      "Scenario 3 — Session Expired",       720,  "dave",      DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
-        ("judy",      "Scenario 4 — Login Without Token",   900,  "judy",      DomainEvent::Identity(IdentityEvent::LoginSuccess)),
-        // ── ControlPlane domain — Scenario B (privilege misuse) ──────────────
-        ("svc_alpha", "Scenario B — Privilege Misuse",      1000, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
-        ("svc_alpha", "Scenario B — Privilege Misuse",      1030, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
-        ("rogue_svc", "Scenario B — Privilege Misuse",      1100, "rogue_svc", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
-        ("svc_beta",  "Scenario B — Privilege Misuse",      1200, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
-        ("svc_beta",  "Scenario B — Privilege Misuse",      5000, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        // ── ControlPlane domain — Scenario A (Legitimate Variation) ──────────
+        ("svc_alpha", "Scenario A — Legitimate Variation", 1000, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_alpha", "Scenario A — Legitimate Variation", 1030, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        // ── ControlPlane domain — Scenario B (Privilege Misuse) ──────────────
+        ("rogue_svc", "Scenario B — Privilege Misuse",     1100, "rogue_svc", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        ("svc_beta",  "Scenario B — Privilege Misuse",     1200, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_beta",  "Scenario B — Privilege Misuse",     5000, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        // ── Thermal domain — Scenario C (Silent Scheduler Bias) ──────────────
+        ("rack_a", "Scenario C — Silent Scheduler Bias", 6000, "rack_a", DomainEvent::Thermal(ThermalEvent::WorkloadScheduled)),
+        ("rack_a", "Scenario C — Silent Scheduler Bias", 6300, "rack_a", DomainEvent::Thermal(ThermalEvent::ThermalReading(52))),
+        ("rack_b", "Scenario C — Silent Scheduler Bias", 6600, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(56))),
+        ("rack_b", "Scenario C — Silent Scheduler Bias", 7200, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(61))),
+        ("rack_b", "Scenario C — Silent Scheduler Bias", 7800, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(64))),
+        // ── Automation domain — Scenario D (Automation Amplification) ─────────
+        ("orchestrator", "Scenario D — Automation Amplification", 9000, "orchestrator", DomainEvent::Automation(AutomationEvent::StateValidated)),
+        ("orchestrator", "Scenario D — Automation Amplification", 9100, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        ("orchestrator", "Scenario D — Automation Amplification", 9400, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        ("orchestrator", "Scenario D — Automation Amplification", 9600, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        ("orchestrator", "Scenario D — Automation Amplification", 9900, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
     ];
 
     for (group, label, ts, user, kind) in &script {
@@ -617,13 +879,16 @@ fn run_scenario() -> Vec<StepData> {
         let ev      = Event::new(*ts, user, kind.clone());
         let id_pre  = engine.state.get(ev.entity).cloned();
         let cp_pre  = cp_engine.state.get(ev.entity).cloned();
-        let check   = compute_check(&ev, id_pre.as_ref(), cp_pre.as_ref());
+        let th_pre  = thermal_engine.state.get(ev.entity).cloned();
+        let au_pre  = automation_engine.state.get(ev.entity).cloned();
+        let check   = compute_check(&ev, id_pre.as_ref(), cp_pre.as_ref(), th_pre.as_ref(), au_pre.as_ref());
         let variances = match ev.kind.domain() {
-            Domain::Identity     => engine.ingest(&ev),
-            Domain::ControlPlane => cp_engine.ingest(&ev),
-            _                    => vec![],
+            Domain::Identity    => engine.ingest(&ev),
+            Domain::ControlPlane=> cp_engine.ingest(&ev),
+            Domain::Thermal     => thermal_engine.ingest(&ev),
+            Domain::Automation  => automation_engine.ingest(&ev),
         };
-        let snap   = snapshot(&engine.state, &cp_engine.state, *ts);
+        let snap   = snapshot(&engine.state, &cp_engine.state, &thermal_engine.state, &automation_engine.state, *ts);
         let phases = NARRATIVES.get(seq - 1).copied().unwrap_or(&[]).to_vec();
 
         user_history.entry(user.to_string()).or_default().push((seq, *ts, kind.name()));
@@ -640,32 +905,6 @@ fn run_scenario() -> Vec<StepData> {
         });
     }
 
-    for (user, var) in engine.finalize() {
-        seq += 1;
-        let snap    = snapshot(&engine.state, &cp_engine.state, 9999);
-        let phases  = NARRATIVES.get(seq - 1).copied().unwrap_or(&[]).to_vec();
-        let history = user_history.get(&user).cloned().unwrap_or_default();
-        steps.push(StepData {
-            seq, ts: 9999, user: user.clone(), event: "FINALIZE",
-            group: user.clone(), group_label: "Scenario 4 — Login Without Token".to_string(),
-            is_deferred: true,
-            check: CheckInfo {
-                rule: "Deferred — Contract 1: LoginSuccess(user) → AuthTokenIssued(user)".to_string(),
-                lookup: vec![
-                    ("trigger".into(),      "Stream ended".to_string(),                                  "neutral".into()),
-                    ("user".into(),         user.clone(),                                                 "neutral".into()),
-                    ("has_login".into(),    "yes".to_string(),                                           "ok".into()),
-                    ("token_issued".into(), "NONE".to_string(),                                          "warn".into()),
-                    ("contract_1".into(),   "LoginSuccess never followed by AuthTokenIssued".to_string(), "fail".into()),
-                ],
-                result: "warn",
-                result_text: "⚠ CONTRACT WARNING".to_string(),
-                result_detail: format!("'{}': login recorded but AuthTokenIssued never arrived before stream end", user),
-            },
-            variances: vec![VarInfo { severity: var.severity.as_str(), rule: var.rule.to_string(), detail: var.detail.clone() }],
-            state_snap: snap, phases, history,
-        });
-    }
     steps
 }
 
@@ -674,8 +913,10 @@ fn run_scenario() -> Vec<StepData> {
 /// Declared scenario inputs + expected outcomes, matched against the POC document.
 /// Each future domain phase will add its own SCENARIO_X_JS constant.
 const SCENARIOS_JS: &str = r#"[
-  {id:"A",name:"Legitimate Variation",label:"Scenario A \u2014 Legitimate Variation",domain:"Identity",description:"Full authentication chain within 5-min window. No invariants broken.",expected:0},
-  {id:"B",name:"Privilege Misuse",label:"Scenario B \u2014 Privilege Misuse",domain:"ControlPlane",description:"Stealth admin actions without valid role assignments. Two Critical violations expected.",expected:2}
+  {id:"A",name:"Legitimate Variation",label:"Scenario A \u2014 Legitimate Variation",domain:"ControlPlane",description:"Valid role assignment followed by admin action within 1-hour window. No invariants broken.",expected:0},
+  {id:"B",name:"Privilege Misuse",label:"Scenario B \u2014 Privilege Misuse",domain:"ControlPlane",description:"Stealth admin actions without valid role assignments. Two Critical violations expected.",expected:2},
+  {id:"C",name:"Silent Scheduler Bias",label:"Scenario C \u2014 Silent Scheduler Bias",domain:"Thermal",description:"Sustained rack thermal bias with no declared workload shift. Three violations expected: 1 Warning escalating to 2 Critical.",expected:3},
+  {id:"D",name:"Automation Amplification",label:"Scenario D \u2014 Automation Amplification",domain:"Automation",description:"Repeated automation triggers on unvalidated system state. Three violations expected: 1 Warning escalating to 2 Critical.",expected:3}
 ]"#;
 
 // ── Serialize to JS ───────────────────────────────────────────────────────────
@@ -953,6 +1194,27 @@ button:disabled{opacity:.4;cursor:not-allowed}
   color:var(--muted);margin:.35rem 0}
 .modal-chain .arrow{color:var(--green);font-weight:700}
 .modal-chain .window{font-size:.62rem;color:var(--dim);margin-left:.25rem}
+/* Speed button */
+#speed-btn{min-width:2.6rem;font-variant-numeric:tabular-nums}
+/* Print button — hidden until run completes */
+#print-btn{display:none;border-color:var(--muted);color:var(--muted)}
+#print-btn:hover:not(:disabled){border-color:var(--text);color:var(--text)}
+/* Scenario jump — make rows clickable */
+.sc-row{cursor:pointer;border-radius:3px;transition:background .12s}
+.sc-row:hover{background:rgba(79,172,254,.07)}
+.sc-jump-hint{margin-left:auto;font-size:.57rem;color:var(--blue);opacity:0;transition:opacity .15s;flex-shrink:0;padding-right:.1rem}
+.sc-row:hover .sc-jump-hint{opacity:1}
+/* Completion scenario summary */
+.sc-summary-grid{display:flex;flex-direction:column;gap:.22rem;margin-top:.5rem}
+.sc-summary-card{display:flex;align-items:center;gap:.5rem;padding:.28rem .45rem;background:var(--panel);border:1px solid var(--border);border-radius:4px;border-left:3px solid var(--border);font-size:.62rem}
+.sc-summary-card.pass{border-left-color:var(--green)}
+.sc-summary-card.fail{border-left-color:var(--red)}
+.sc-summary-id{color:var(--blue);font-weight:700;min-width:2.2rem;flex-shrink:0}
+.sc-summary-name{flex:1;color:var(--text)}
+.sc-summary-domain{color:var(--muted);font-size:.57rem;min-width:5rem;flex-shrink:0}
+.sc-summary-result{font-weight:700;white-space:nowrap;flex-shrink:0}
+.sc-summary-result.pass{color:var(--green)}
+.sc-summary-result.fail{color:var(--red)}
 "#;
 
 // ── JS ────────────────────────────────────────────────────────────────────────
@@ -974,7 +1236,9 @@ const WINDOW_SECS = 300;
       '<span class="sc-domain">' + sc.domain + ' Domain</span>' +
       '<span class="sc-sep">\u00b7</span>' +
       '<span class="sc-expected">expected: ' + sc.expected + ' variance' + (sc.expected!==1?'s':'') + '</span>' +
-      '<span class="sc-result pending" id="sc-result-' + sc.id + '">awaiting run</span>';
+      '<span class="sc-result pending" id="sc-result-' + sc.id + '">awaiting run</span>' +
+      '<span class="sc-jump-hint">\u25b6 run</span>';
+    row.addEventListener('click', () => jumpToScenario(sc.id));
     bar.appendChild(row);
   });
 })();
@@ -982,8 +1246,12 @@ const WINDOW_SECS = 300;
 let running = false;
 let stepMode = false;
 let stepResolve = null;
+let activeSteps = [];
+let speedMult = 1;
+const SPEED_CYCLE = [1, 2, 3, 0.5];
+let speedCycleIdx = 0;
 
-function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms){ return new Promise(r => setTimeout(r, ms/speedMult)); }
 
 function waitForStep(){
   const btn = document.getElementById('narrator-next');
@@ -996,17 +1264,27 @@ document.getElementById('narrator-next').addEventListener('click', () => {
     document.getElementById('narrator-next').disabled = true; }
 });
 
-async function startDemo(useStepMode){
+async function startDemo(useStepMode, startIdx = 0){
   if (running) return;
   running = true; stepMode = useStepMode;
+  activeSteps = STEPS.slice(startIdx);
   document.getElementById('play-btn').disabled = true;
   document.getElementById('step-btn').disabled = true;
   document.getElementById('reset-btn').style.display = 'inline-flex';
   if (stepMode) document.getElementById('narrator').classList.add('active');
   resetAll();
-  for (const step of STEPS) await processStep(step);
+  for (const step of activeSteps) await processStep(step);
   showComplete();
   running = false;
+}
+
+async function jumpToScenario(scId){
+  if (running) return;
+  const sc = SCENARIOS.find(s => s.id === scId);
+  if (!sc) return;
+  const startIdx = STEPS.findIndex(s => s.group_label === sc.label);
+  if (startIdx < 0) return;
+  startDemo(false, startIdx);
 }
 
 async function processStep(step){
@@ -1241,10 +1519,11 @@ function updateState(step){
 
 function updateScenarioResult(){
   SCENARIOS.forEach(sc => {
-    const steps  = STEPS.filter(s => s.group_label === sc.label);
-    const actual = steps.reduce((n,s) => n + s.variances.length, 0);
-    const el     = document.getElementById('sc-result-' + sc.id);
+    const scSteps = activeSteps.filter(s => s.group_label === sc.label);
+    const el      = document.getElementById('sc-result-' + sc.id);
     if(!el) return;
+    if(scSteps.length === 0) return; // scenario not run this session — leave as awaiting
+    const actual = scSteps.reduce((n,s) => n + s.variances.length, 0);
     if(actual === sc.expected){
       el.textContent = '\u2714 PASS \u2014 ' + actual + ' variance' + (actual!==1?'s':'');
       el.className = 'sc-result pass';
@@ -1256,25 +1535,41 @@ function updateScenarioResult(){
 }
 
 function showComplete(){
+  document.getElementById('print-btn').style.display = 'inline-flex';
   updateScenarioResult();
-  const crit = STEPS.reduce((n,s) => n + s.variances.filter(v => v.severity==='critical').length, 0);
-  const warn = STEPS.reduce((n,s) => n + s.variances.filter(v => v.severity==='warning').length, 0);
-  const clean = STEPS.filter(s => s.variances.length === 0).length;
-  document.getElementById('check-panel').innerHTML = `
-    <div class="check-hdr">ENGINE COMPLETE</div>
-    <div class="complete-grid">
-      <div class="csstat cs-total"><div class="csval">${STEPS.length}</div><div class="cslbl">Events</div></div>
-      <div class="csstat cs-critical"><div class="csval">${crit}</div><div class="cslbl">Critical</div></div>
-      <div class="csstat cs-warn"><div class="csval">${warn}</div><div class="cslbl">Warnings</div></div>
-      <div class="csstat cs-pass"><div class="csval">${clean}</div><div class="cslbl">Clean</div></div>
-    </div>
-    <div class="complete-note">
-      ${crit} critical violation${crit!==1?'s':''} proven across ${Object.keys(STEPS[STEPS.length-1].state).length} identities.
-      Every detection is a deterministic causal proof — not a score, not a threshold, not a model.
-    </div>`;
+  const crit  = activeSteps.reduce((n,s) => n + s.variances.filter(v => v.severity==='critical').length, 0);
+  const warn  = activeSteps.reduce((n,s) => n + s.variances.filter(v => v.severity==='warning').length, 0);
+  const clean = activeSteps.filter(s => s.variances.length === 0).length;
+  const last  = activeSteps[activeSteps.length - 1];
+  const entityCount = last ? Object.keys(last.state).length : 0;
+  const scCards = SCENARIOS.map(sc => {
+    const scSteps = activeSteps.filter(s => s.group_label === sc.label);
+    if(scSteps.length === 0) return '';
+    const actual = scSteps.reduce((n,s) => n + s.variances.length, 0);
+    const passed = actual === sc.expected;
+    const cls    = passed ? 'pass' : 'fail';
+    return `<div class="sc-summary-card ${cls}">` +
+      `<span class="sc-summary-id">Scenario ${sc.id}</span>` +
+      `<span class="sc-summary-name">${sc.name}</span>` +
+      `<span class="sc-summary-domain">${sc.domain}</span>` +
+      `<span class="sc-summary-result ${cls}">${passed?'\u2714 PASS':'\u2718 FAIL'} \u00b7 ${actual} violation${actual!==1?'s':''}</span>` +
+      `</div>`;
+  }).filter(Boolean).join('');
+  document.getElementById('check-panel').innerHTML =
+    `<div class="check-hdr">ENGINE COMPLETE</div>` +
+    `<div class="complete-grid">` +
+      `<div class="csstat cs-total"><div class="csval">${activeSteps.length}</div><div class="cslbl">Events</div></div>` +
+      `<div class="csstat cs-critical"><div class="csval">${crit}</div><div class="cslbl">Critical</div></div>` +
+      `<div class="csstat cs-warn"><div class="csval">${warn}</div><div class="cslbl">Warnings</div></div>` +
+      `<div class="csstat cs-pass"><div class="csval">${clean}</div><div class="cslbl">Clean</div></div>` +
+    `</div>` +
+    `<div class="complete-note">${crit} critical violation${crit!==1?'s':''} proven across ${entityCount} identities. ` +
+    `Every detection is a deterministic causal proof \u2014 not a score, not a threshold, not a model.</div>` +
+    (scCards ? `<div class="sc-summary-grid">${scCards}</div>` : '');
 }
 
 function resetAll(){
+  document.getElementById('print-btn').style.display = 'none';
   document.getElementById('event-stream').innerHTML = '';
   document.getElementById('check-panel').innerHTML  = '<div class="check-idle">Waiting for events...</div>';
   document.getElementById('state-panel').innerHTML  = '<div class="state-idle">State will appear as events are processed</div>';
@@ -1290,6 +1585,11 @@ function resetAll(){
 
 document.getElementById('play-btn').addEventListener('click',  () => startDemo(false));
 document.getElementById('step-btn').addEventListener('click',  () => startDemo(true));
+document.getElementById('speed-btn').addEventListener('click', () => {
+  speedCycleIdx = (speedCycleIdx + 1) % SPEED_CYCLE.length;
+  speedMult = SPEED_CYCLE[speedCycleIdx];
+  document.getElementById('speed-btn').textContent = speedMult + '\u00d7';
+});
 document.getElementById('reset-btn').addEventListener('click', () => {
   running = false; stepMode = false;
   document.getElementById('narrator').classList.remove('active');
@@ -1298,6 +1598,82 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   document.getElementById('reset-btn').style.display = 'none';
   resetAll();
 });
+document.getElementById('print-btn').addEventListener('click', printReport);
+
+function printReport(){
+  const now   = new Date().toLocaleString();
+  const crit  = activeSteps.reduce((n,s) => n + s.variances.filter(v => v.severity==='critical').length, 0);
+  const warn  = activeSteps.reduce((n,s) => n + s.variances.filter(v => v.severity==='warning').length, 0);
+
+  const scRows = SCENARIOS.map(sc => {
+    const scSteps = activeSteps.filter(s => s.group_label === sc.label);
+    if(scSteps.length === 0) return '';
+    const actual = scSteps.reduce((n,s) => n + s.variances.length, 0);
+    const passed = actual === sc.expected;
+    return `<tr><td><strong>Scenario ${sc.id}</strong></td><td>${sc.name}</td><td>${sc.domain}</td>` +
+      `<td style="text-align:center">${sc.expected}</td><td style="text-align:center">${actual}</td>` +
+      `<td class="${passed?'pass':'fail'}">${passed?'\u2714 PASS':'\u2718 FAIL'}</td></tr>`;
+  }).filter(Boolean).join('');
+
+  const violRows = activeSteps.flatMap(s => s.variances.map(v =>
+    `<tr><td class="${v.severity}">${v.severity.toUpperCase()}</td>` +
+    `<td>${s.user}</td><td>t=${s.is_deferred?'end':s.ts+'s'}</td>` +
+    `<td>${v.rule}</td><td>${v.detail}</td></tr>`
+  )).join('') || `<tr><td colspan="5" style="text-align:center;color:#64748b">No violations detected</td></tr>`;
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Auth Chain Integrity Engine \u2014 POC Report</title>
+<style>
+body{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#1a1a2e;margin:2cm;line-height:1.55}
+h1{font-size:17px;margin:0;color:#0f172a}
+h2{font-size:11px;border-bottom:1px solid #e2e8f0;padding-bottom:3px;margin:18px 0 6px;
+  color:#334155;text-transform:uppercase;letter-spacing:.07em}
+.sub{color:#64748b;font-size:11px;margin:2px 0 2px}
+.meta{font-size:10px;color:#94a3b8;margin-bottom:16px;border-bottom:1px solid #f1f5f9;padding-bottom:8px}
+.stats{display:flex;gap:24px;margin:8px 0 4px}
+.stat-val{font-size:20px;font-weight:700;line-height:1}
+.stat-lbl{font-size:9px;text-transform:uppercase;letter-spacing:.05em;color:#64748b}
+.crit{color:#dc2626}.warn{color:#d97706}
+table{width:100%;border-collapse:collapse;margin-top:6px;font-size:11px}
+th{background:#f1f5f9;text-align:left;padding:5px 8px;font-size:10px;
+  text-transform:uppercase;letter-spacing:.05em;border:1px solid #e2e8f0}
+td{padding:5px 8px;border:1px solid #e2e8f0;vertical-align:top}
+tr:nth-child(even) td{background:#f8fafc}
+.pass{color:#15803d;font-weight:700}.fail{color:#dc2626;font-weight:700}
+.CRITICAL{color:#dc2626;font-weight:700}.WARNING{color:#d97706;font-weight:700}
+.tagline{margin-top:20px;padding:10px 12px;background:#f1f5f9;
+  border-left:3px solid #3b82f6;font-size:11px;color:#475569}
+@media print{body{margin:1.5cm}}
+</style></head><body>
+<h1>Authentication Chain Integrity Engine</h1>
+<div class="sub">Cross-Domain Causal Validation Report \u2014 MediaStream.ai Netsapien\u2122 PILOT POC</div>
+<div class="meta">Generated: ${now} &nbsp;\u00b7&nbsp; Environment: Isolated digital twin, software-only, stateless
+&nbsp;\u00b7&nbsp; Engine: Deterministic invariant enforcement \u00b7 No ML \u00b7 No pattern recognition</div>
+<h2>Run Summary</h2>
+<div class="stats">
+  <div><div class="stat-val">${activeSteps.length}</div><div class="stat-lbl">Events</div></div>
+  <div><div class="stat-val crit">${crit}</div><div class="stat-lbl">Critical</div></div>
+  <div><div class="stat-val warn">${warn}</div><div class="stat-lbl">Warnings</div></div>
+  <div><div class="stat-val">${activeSteps.filter(s=>s.variances.length===0).length}</div><div class="stat-lbl">Clean</div></div>
+</div>
+<h2>Scenario Results</h2>
+<table><thead><tr><th>Scenario</th><th>Name</th><th>Domain</th><th>Expected</th><th>Actual</th><th>Result</th></tr></thead>
+<tbody>${scRows}</tbody></table>
+<h2>Violations Detected</h2>
+<table><thead><tr><th>Severity</th><th>Entity</th><th>Timestamp</th><th>Contract</th><th>Detail</th></tr></thead>
+<tbody>${violRows}</tbody></table>
+<div class="tagline"><strong>Every violation above is a deterministic causal proof</strong> \u2014 not a risk score,
+not a threshold alert, not a model prediction. Each entry traces a broken invariant to a specific event
+sequence with a named entity and contract rule.</div>
+</body></html>`;
+
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  w.print();
+}
+
 // Modal
 (function(){
   const overlay = document.getElementById('modal-overlay');
@@ -1335,15 +1711,16 @@ r#"<!DOCTYPE html>
     <p>Deterministic invariant enforcement · no ML · no pattern recognition</p>
   </div>
   <div class="hdr-contract">
-    LoginSuccess <span class="arrow">→</span>
-    AuthTokenIssued <span class="arrow">→</span>
-    AuthTokenUsed
-    <span style="color:var(--dim);margin-left:.4rem">· 5-min window</span>
+    RoleAssigned <span class="arrow">→</span>
+    AdminActionTaken
+    <span style="color:var(--dim);margin-left:.4rem">· 1-hour window</span>
   </div>
   <div class="hdr-controls">
     <button id="play-btn">▶ Play</button>
     <button id="step-btn">⏸ Step Through</button>
     <button id="reset-btn">↺ Reset</button>
+    <button id="speed-btn" title="Playback speed">1×</button>
+    <button id="print-btn" title="Export findings report">⎙ Report</button>
     <button id="help-btn" title="About this demo">?</button>
   </div>
 </header>
@@ -1357,32 +1734,46 @@ r#"<!DOCTYPE html>
     <div id="modal-body">
       <div class="modal-section">
         <div class="modal-h">What It Is</div>
-        <p>A Rust pipeline that enforces authentication contracts through <strong style="color:var(--blue)">deterministic causal reasoning</strong> — no ML, no probabilistic models, pure logical invariants.</p>
+        <p>A deterministic causal validation engine that enforces <strong style="color:var(--blue)">integrity across four domains</strong> of a sovereign AI platform — no ML, no probabilistic models, pure logical invariants. When something goes wrong, the engine doesn't guess; it traces the causal chain backwards and proves exactly where it broke.</p>
       </div>
       <div class="modal-section">
-        <div class="modal-h">The Causal Chain</div>
-        <div class="modal-chain">
-          LoginSuccess <span class="arrow">→</span> AuthTokenIssued <span class="arrow">→</span> AuthTokenUsed
-          <span class="window">· 5-minute freshness window</span>
-        </div>
-        <p style="color:var(--nbody)">Each step must causally follow the prior one within the window. The engine ingests an event stream and asks: did every token use have a valid, recent, complete auth chain behind it?</p>
+        <div class="modal-h">What Each Domain Enforces</div>
+        <table class="modal-table">
+          <tr>
+            <td>ControlPlane</td>
+            <td><div class="modal-chain" style="margin:.15rem 0">RoleAssigned <span class="arrow">→</span> AdminActionTaken <span class="window">· 1-hour window</span></div>
+            Detects <strong style="color:var(--text)">privilege misuse</strong> — admin actions taken without a valid, current role assignment.</td>
+          </tr>
+          <tr>
+            <td>Thermal</td>
+            <td><div class="modal-chain" style="margin:.15rem 0">WorkloadScheduled <span class="arrow">→</span> ThermalReading <span class="window">· 30-min window</span></div>
+            Detects <strong style="color:var(--text)">silent scheduler bias</strong> — sustained heat load on a rack with no declared workload to explain it.</td>
+          </tr>
+          <tr>
+            <td>Automation</td>
+            <td><div class="modal-chain" style="margin:.15rem 0">StateValidated <span class="arrow">→</span> AutomationTriggered <span class="window">· 5-min window</span></div>
+            Detects <strong style="color:var(--text)">automation amplification</strong> — repeated AI-triggered remediations on system state that has not been re-validated, potentially amplifying an attacker's manipulation rather than correcting it.</td>
+          </tr>
+        </table>
       </div>
       <div class="modal-section">
         <div class="modal-h">What the Demo Shows</div>
         <table class="modal-table">
-          <tr><td>alice</td><td>Happy path — full chain within window</td><td><span class="modal-pass">✔ All contracts satisfied</span></td></tr>
-          <tr><td>bob</td><td>Token used with no prior login</td><td><span class="modal-fail">✘ Critical — unauthenticated access</span></td></tr>
-          <tr><td>dave</td><td>Token used 320 s after login (window = 300 s)</td><td><span class="modal-fail">✘ Critical — session expired</span></td></tr>
-          <tr><td>judy</td><td>Login recorded, token never issued before stream ends</td><td><span class="modal-warn">⚠ Warning — deferred obligation unfulfilled</span></td></tr>
+          <tr><td>Scenario A · ControlPlane</td><td>svc_alpha: role assigned, admin action within 1-hour window</td><td><span class="modal-pass">✔ PASS — 0 variances</span></td></tr>
+          <tr><td>Scenario B · ControlPlane</td><td>rogue_svc: admin action with no role on record</td><td><span class="modal-fail">✘ Critical — no role assignment</span></td></tr>
+          <tr><td>Scenario B · ControlPlane</td><td>svc_beta: admin action 200 s past role expiry</td><td><span class="modal-fail">✘ Critical — stale role</span></td></tr>
+          <tr><td>Scenario C · Thermal</td><td>rack_a: workload declared, high temp reading justified</td><td><span class="modal-pass">✔ PASS — bias justified</span></td></tr>
+          <tr><td>Scenario C · Thermal</td><td>rack_b: rising temps (56 → 61 → 64°C), no workload declared</td><td><span class="modal-warn">⚠ Warning</span> + <span class="modal-fail">✘ Critical ×2</span></td></tr>
+          <tr><td>Scenario D · Automation</td><td>orchestrator: 3 triggers after 5-min validation window expires</td><td><span class="modal-warn">⚠ Warning</span> + <span class="modal-fail">✘ Critical ×2</span></td></tr>
         </table>
-        <p style="color:var(--nbody);margin-top:.5rem">Every violation produces a <strong style="color:var(--text)">deterministic proof</strong>, not a risk score — e.g. <em>"login was 320 s ago, window is 300 s, exceeded by 20 s."</em></p>
+        <p style="color:var(--nbody);margin-top:.5rem">Every violation is a <strong style="color:var(--text)">deterministic proof</strong>, not a risk score — e.g. <em>"validation expired 100 s ago, trigger_count=2: automation is amplifying an unresolved deviation."</em></p>
       </div>
       <div class="modal-section">
         <div class="modal-h">How to Use the Demo</div>
         <ul style="margin:.2rem 0 0 1.2rem;color:var(--nbody);font-size:.68rem;line-height:1.9">
-          <li><strong style="color:var(--green)">▶ Play</strong> — steps through all events automatically</li>
-          <li><strong style="color:var(--blue)">⏸ Step Through</strong> — advance one phase at a time with narrator guidance</li>
-          <li><strong style="color:var(--text)">↺ Reset</strong> — clear state and restart from the beginning</li>
+          <li><strong style="color:var(--green)">▶ Play</strong> — steps through all 15 events automatically across all 4 domains</li>
+          <li><strong style="color:var(--blue)">⏸ Step Through</strong> — advance one phase at a time with narrator guidance explaining each causal check</li>
+          <li><strong style="color:var(--text)">↺ Reset</strong> — clear all state and restart from the beginning</li>
         </ul>
       </div>
     </div>

@@ -55,28 +55,66 @@ impl ControlPlaneEvent {
     }
 }
 
+// ── Thermal domain events ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ThermalEvent {
+    WorkloadScheduled,
+    ThermalReading(u64), // temperature in °C
+}
+
+impl ThermalEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::WorkloadScheduled  => "WorkloadScheduled",
+            Self::ThermalReading(_)  => "ThermalReading",
+        }
+    }
+}
+
+// ── Automation domain events ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutomationEvent {
+    StateValidated,
+    AutomationTriggered,
+}
+
+impl AutomationEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::StateValidated      => "StateValidated",
+            Self::AutomationTriggered => "AutomationTriggered",
+        }
+    }
+}
+
 // ── Top-level domain event ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DomainEvent {
     Identity(IdentityEvent),
     ControlPlane(ControlPlaneEvent),
-    // Thermal(ThermalEvent),     // Phase 3
-    // Automation(AutomationEvent), // Phase 4
+    Thermal(ThermalEvent),
+    Automation(AutomationEvent),
 }
 
 impl DomainEvent {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Identity(e)     => e.name(),
-            Self::ControlPlane(e) => e.name(),
+            Self::Identity(e)    => e.name(),
+            Self::ControlPlane(e)=> e.name(),
+            Self::Thermal(e)     => e.name(),
+            Self::Automation(e)  => e.name(),
         }
     }
 
     pub fn domain(&self) -> Domain {
         match self {
-            Self::Identity(_)     => Domain::Identity,
-            Self::ControlPlane(_) => Domain::ControlPlane,
+            Self::Identity(_)    => Domain::Identity,
+            Self::ControlPlane(_)=> Domain::ControlPlane,
+            Self::Thermal(_)     => Domain::Thermal,
+            Self::Automation(_)  => Domain::Automation,
         }
     }
 }
@@ -100,5 +138,13 @@ impl Event {
 
     pub fn control_plane(ts: u64, entity: &'static str, kind: ControlPlaneEvent) -> Self {
         Self::new(ts, entity, DomainEvent::ControlPlane(kind))
+    }
+
+    pub fn thermal(ts: u64, entity: &'static str, kind: ThermalEvent) -> Self {
+        Self::new(ts, entity, DomainEvent::Thermal(kind))
+    }
+
+    pub fn automation(ts: u64, entity: &'static str, kind: AutomationEvent) -> Self {
+        Self::new(ts, entity, DomainEvent::Automation(kind))
     }
 }
