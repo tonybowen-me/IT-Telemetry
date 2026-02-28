@@ -1,10 +1,12 @@
+mod control_plane;
 mod engine;
 mod events;
 mod state;
 mod variance;
 
+use control_plane::{ControlPlaneEngine, ControlPlaneState, ControlPlaneStore, CP_WINDOW};
 use engine::{Engine, WINDOW};
-use events::{AuthEvent, Event};
+use events::{ControlPlaneEvent, DomainEvent, Domain, IdentityEvent, Event};
 use state::{AuthState, StateStore};
 use variance::Variance;
 
@@ -27,10 +29,10 @@ struct VarInfo {
     detail:   String,
 }
 
-struct UserState {
-    last_login:   Option<u64>,
-    token_issued: Option<u64>,
-    token_used:   bool,
+struct EntityState {
+    domain: &'static str,
+    /// (label, value, status_class) — rendered generically in the state panel
+    fields: Vec<(String, String, String)>,
 }
 
 /// (phase_label, heading, body)
@@ -46,7 +48,7 @@ struct StepData {
     is_deferred: bool,
     check:       CheckInfo,
     variances:   Vec<VarInfo>,
-    state_snap:  Vec<(String, UserState)>,
+    state_snap:  Vec<(String, EntityState)>,
     phases:      Vec<Phase>,
     /// All events seen for this user up to and including this step (seq, ts, event_name)
     history:     Vec<(usize, u64, &'static str)>,
@@ -224,7 +226,105 @@ static NARRATIVES: &[&[Phase]] = &[
           the finalize pass — when the engine audits all open contracts \
           that could not be evaluated in real-time."),
     ],
-    // ── Step 9: FINALIZE(judy) ────────────────────────────────────────────────
+    // ── Step 9: RoleAssigned(svc_alpha, t=1000) ── ControlPlane domain ───────
+    &[
+        ("Event Arrives",
+         "RoleAssigned — svc_alpha @ t=1000s",
+         "The ControlPlane engine receives its first event: svc_alpha has been \
+          granted a role. Contract CP-2 states that any AdminActionTaken must be \
+          backed by a RoleAssigned within the 1-hour validity window. \
+          The engine records the assignment timestamp and opens the window."),
+        ("State Lookup",
+         "Creating svc_alpha's ControlPlane state",
+         "No prior entry exists for svc_alpha. The engine initialises: \
+          role_assigned_at=1000, admin_action_taken=false. \
+          The 1-hour validity window runs t=1000s → t=4600s. \
+          Role assignment triggers no immediate check."),
+        ("Invariant Result",
+         "⏳ Pending — role window is open",
+         "The role is recorded. The engine is now watching for AdminActionTaken \
+          from svc_alpha. Any such event arriving before t=4600s will be \
+          considered authorised. After that, the role is stale."),
+    ],
+    // ── Step 10: AdminActionTaken(svc_alpha, t=1030) ─────────────────────────
+    &[
+        ("Event Arrives",
+         "AdminActionTaken — svc_alpha @ t=1030s",
+         "svc_alpha performs an admin action 30 seconds after role assignment. \
+          Contract CP-2 fires: the engine checks that a valid RoleAssigned exists \
+          within the 1-hour window. The lookup runs now."),
+        ("State Lookup",
+         "Checking svc_alpha's role state",
+         "svc_alpha.role_assigned_at=1000. Elapsed since assignment: 30s. \
+          Window: 3600s. 30 < 3600 — the role is current. \
+          Contract CP-2 is satisfied. State updated: admin_action_taken=true."),
+        ("Invariant Result",
+         "✔ Pass — admin action is authorised",
+         "svc_alpha's action is backed by a valid, recent role assignment. \
+          This is the ControlPlane equivalent of Scenario A: the full \
+          authorisation chain is intact. Role → Action within the window."),
+    ],
+    // ── Step 11: AdminActionTaken(rogue_svc, t=1100) ─────────────────────────
+    &[
+        ("Event Arrives",
+         "AdminActionTaken — rogue_svc @ t=1100s",
+         "rogue_svc attempts an admin action. This is the first event the engine \
+          has ever seen from this service account — there is no role assignment \
+          on record. Contract CP-2 fires immediately: has rogue_svc been \
+          granted a role?"),
+        ("State Lookup",
+         "Looking up rogue_svc — no state found",
+         "rogue_svc has no entry in the ControlPlane state store. \
+          No RoleAssigned. No authorisation chain whatsoever. \
+          Yet a privileged admin action is being attempted. \
+          This is stealth privilege misuse — the defining Scenario B pattern."),
+        ("Invariant Result",
+         "✘ Critical — admin action without role assignment",
+         "Hard causal failure: a privileged action was taken by a service account \
+          that was never granted a role. The contract is explicit: AdminActionTaken \
+          MUST have a prior RoleAssigned. None exists. \
+          In a real deployment: immediate alert, lateral movement suspected."),
+    ],
+    // ── Step 12: RoleAssigned(svc_beta, t=1200) ──────────────────────────────
+    &[
+        ("Event Arrives",
+         "RoleAssigned — svc_beta @ t=1200s",
+         "svc_beta receives a role assignment at t=1200s. This opens a 1-hour \
+          validity window expiring at t=4800s. The engine records this and \
+          waits. What happens if svc_beta's admin action arrives after the window closes?"),
+        ("State Lookup",
+         "Creating svc_beta's ControlPlane state",
+         "svc_beta.role_assigned_at=1200, admin_action_taken=false. \
+          Window: [1200s, 4800s]. Everything is in order for now. \
+          The engine records the assignment and notes the critical deadline: t=4800s."),
+        ("Invariant Result",
+         "⏳ Pending — window closes at t=4800s",
+         "Same deferred pattern as svc_alpha's first event. \
+          The next AdminActionTaken from svc_beta will be the deciding moment. \
+          If it arrives after t=4800s, Contract CP-2 will fail — expired role."),
+    ],
+    // ── Step 13: AdminActionTaken(svc_beta, t=5000) ──────────────────────────
+    &[
+        ("Event Arrives",
+         "AdminActionTaken — svc_beta @ t=5000s",
+         "svc_beta attempts an admin action at t=5000s. The role was assigned \
+          at t=1200s. The window expired at t=4800s. \
+          The engine calculates: 5000 − 1200 = 3800s since assignment. \
+          The window is 3600s. svc_beta is 200 seconds past the deadline."),
+        ("State Lookup",
+         "svc_beta.role_assigned_at=1200s, elapsed=3800s, window=3600s",
+         "3800 > 3600. The role has expired. The engine does not care that the \
+          role was legitimately assigned — what matters is the age of the \
+          RoleAssigned at the time of the admin action. \
+          At t=5000s, svc_beta's role is stale by exactly 200 seconds."),
+        ("Invariant Result",
+         "✘ Critical — role expired, admin action denied",
+         "Contract CP-2 violated. Deterministic proof: 5000 − 1200 = 3800 > 3600. \
+          The role assignment is outside the validity window at the time of action. \
+          This could represent a delayed execution, a stale credential being replayed, \
+          or a service that held an elevated role past its intended validity period."),
+    ],
+    // ── Step 14: FINALIZE(judy) ───────────────────────────────────────────────
     &[
         ("Stream End",
          "FINALIZE — the event stream has ended",
@@ -259,25 +359,82 @@ fn js_str(s: &str) -> String {
     )
 }
 
-fn snapshot(store: &StateStore) -> Vec<(String, UserState)> {
-    let mut users: Vec<_> = store.keys().cloned().collect();
-    users.sort();
-    users.into_iter().map(|user| {
-        let s = store.get(&user).unwrap();
-        (user, UserState {
-            last_login:   s.last_login(),
-            token_issued: s.token_issued_at,
-            token_used:   s.token_used,
-        })
-    }).collect()
+fn snapshot(
+    id_store:  &StateStore,
+    cp_store:  &ControlPlaneStore,
+    current_ts: u64,
+) -> Vec<(String, EntityState)> {
+    let mut out: Vec<(String, EntityState)> = Vec::new();
+
+    // Identity entities
+    for (entity, s) in id_store {
+        let last   = s.last_login();
+        let in_win = last.map(|t| current_ts.saturating_sub(t) <= WINDOW).unwrap_or(false);
+        out.push((entity.clone(), EntityState {
+            domain: "Identity",
+            fields: vec![
+                (
+                    "last_login".into(),
+                    last.map(|t| format!("t={}s{}", t, if !in_win { " ⚠" } else { "" }))
+                        .unwrap_or_else(|| "—".into()),
+                    if last.is_none() { "none" } else if in_win { "ok" } else { "fail" }.into(),
+                ),
+                (
+                    "token_issued".into(),
+                    s.token_issued_at.map(|t| format!("t={}s", t)).unwrap_or_else(|| "—".into()),
+                    if s.token_issued_at.is_some() { "ok" } else { "none" }.into(),
+                ),
+                (
+                    "token_used".into(),
+                    if s.token_used { "yes" } else { "no" }.into(),
+                    if s.token_used { "ok" } else { "none" }.into(),
+                ),
+            ],
+        }));
+    }
+
+    // ControlPlane entities
+    for (entity, s) in cp_store {
+        let in_win = s.role_within(current_ts, CP_WINDOW).is_some();
+        out.push((entity.clone(), EntityState {
+            domain: "ControlPlane",
+            fields: vec![
+                (
+                    "role_assigned_at".into(),
+                    s.role_assigned_at.map(|t| format!("t={}s{}", t, if !in_win { " ⚠" } else { "" }))
+                        .unwrap_or_else(|| "—".into()),
+                    if s.role_assigned_at.is_none() { "none" } else if in_win { "ok" } else { "fail" }.into(),
+                ),
+                (
+                    "admin_action".into(),
+                    if s.admin_action_taken { "yes" } else { "no" }.into(),
+                    if s.admin_action_taken { "ok" } else { "none" }.into(),
+                ),
+            ],
+        }));
+    }
+
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
-fn compute_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
-    match ev.kind {
-        AuthEvent::LoginSuccess => CheckInfo {
-            rule:   "Contract 1 — LoginSuccess(user) → must issue AuthTokenIssued(user)".to_string(),
+fn compute_check(
+    ev:     &Event,
+    id_pre: Option<&AuthState>,
+    cp_pre: Option<&ControlPlaneState>,
+) -> CheckInfo {
+    match &ev.kind {
+        DomainEvent::Identity(_)     => compute_identity_check(ev, id_pre),
+        DomainEvent::ControlPlane(_) => compute_cp_check(ev, cp_pre),
+    }
+}
+
+fn compute_identity_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
+    match &ev.kind {
+        DomainEvent::Identity(IdentityEvent::LoginSuccess) => CheckInfo {
+            rule:   "Contract 1 — LoginSuccess(entity) → must issue AuthTokenIssued(entity)".to_string(),
             lookup: vec![
-                ("user".into(),         ev.user.to_string(),                          "neutral".into()),
+                ("entity".into(),       ev.entity.to_string(),                        "neutral".into()),
                 ("event".into(),        format!("LoginSuccess @ t={}s", ev.ts),       "neutral".into()),
                 ("action".into(),       "Login time recorded to state".to_string(),   "ok".into()),
                 ("watching for".into(), format!("AuthTokenIssued within {}s", WINDOW),"neutral".into()),
@@ -287,12 +444,12 @@ fn compute_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
             result_detail: "Contract 1 is deferred — verified when AuthTokenIssued arrives or the stream ends".to_string(),
         },
 
-        AuthEvent::AuthTokenIssued => {
+        DomainEvent::Identity(IdentityEvent::AuthTokenIssued) => {
             let last  = pre.and_then(|s| s.last_login());
             let valid = pre.map(|s| s.login_within(ev.ts, WINDOW).is_some()).unwrap_or(false);
             let mut lookup = vec![
-                ("user".into(),  ev.user.to_string(),                        "neutral".into()),
-                ("event".into(), format!("AuthTokenIssued @ t={}s", ev.ts), "neutral".into()),
+                ("entity".into(), ev.entity.to_string(),                      "neutral".into()),
+                ("event".into(),  format!("AuthTokenIssued @ t={}s", ev.ts), "neutral".into()),
             ];
             match last {
                 None => {
@@ -321,14 +478,14 @@ fn compute_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
             }
         }
 
-        AuthEvent::AuthTokenUsed => {
+        DomainEvent::Identity(IdentityEvent::AuthTokenUsed) => {
             let has_login   = pre.map(|s| s.has_login()).unwrap_or(false);
             let last_login  = pre.and_then(|s| s.last_login());
             let valid_login = pre.map(|s| s.login_within(ev.ts, WINDOW).is_some()).unwrap_or(false);
             let token_at    = pre.and_then(|s| s.token_issued_at);
             let mut lookup  = vec![
-                ("user".into(),  ev.user.to_string(),                     "neutral".into()),
-                ("event".into(), format!("AuthTokenUsed @ t={}s", ev.ts), "neutral".into()),
+                ("entity".into(), ev.entity.to_string(),                   "neutral".into()),
+                ("event".into(),  format!("AuthTokenUsed @ t={}s", ev.ts), "neutral".into()),
             ];
             if has_login {
                 let t = last_login.unwrap(); let e = ev.ts - t;
@@ -365,6 +522,66 @@ fn compute_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
                     result_detail: detail }
             }
         }
+        _ => unreachable!(), // only called for Identity events
+    }
+}
+
+fn compute_cp_check(ev: &Event, pre: Option<&ControlPlaneState>) -> CheckInfo {
+    match &ev.kind {
+        DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned) => {
+            let rule = "Contract CP-1 — RoleAssigned(entity) · role validity window opens".to_string();
+            CheckInfo {
+                lookup: vec![
+                    ("entity".into(),   ev.entity.to_string(),                          "neutral".into()),
+                    ("event".into(),    format!("RoleAssigned @ t={}s", ev.ts),          "neutral".into()),
+                    ("action".into(),   "Role timestamp recorded to state".to_string(),   "ok".into()),
+                    ("window".into(),   format!("valid for {}s from now", CP_WINDOW),    "neutral".into()),
+                ],
+                rule,
+                result:        "pending",
+                result_text:   "⏳ PENDING".to_string(),
+                result_detail: "Role assigned — engine will verify any AdminActionTaken arrives within the 1-hour window".to_string(),
+            }
+        }
+        DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken) => {
+            let has_role    = pre.map(|s| s.has_role()).unwrap_or(false);
+            let role_at     = pre.and_then(|s| s.role_assigned_at);
+            let in_win      = pre.map(|s| s.role_within(ev.ts, CP_WINDOW).is_some()).unwrap_or(false);
+            let mut lookup  = vec![
+                ("entity".into(), ev.entity.to_string(),                     "neutral".into()),
+                ("event".into(),  format!("AdminActionTaken @ t={}s", ev.ts), "neutral".into()),
+            ];
+            if has_role {
+                let t = role_at.unwrap();
+                let elapsed = ev.ts - t;
+                lookup.push(("role_assigned".into(), format!("t={}s", t),         "neutral".into()));
+                lookup.push(("elapsed".into(),        format!("{}s", elapsed),      if elapsed <= CP_WINDOW { "ok".into() } else { "fail".into() }));
+                lookup.push(("window".into(),         format!("{}s", CP_WINDOW),    "neutral".into()));
+                lookup.push(("role_valid?".into(),
+                    if in_win { "YES".into() } else { format!("NO — expired by {}s", elapsed - CP_WINDOW) },
+                    if in_win { "ok".into() } else { "fail".into() },
+                ));
+            } else {
+                lookup.push(("role_assigned".into(), "NONE".into(),                            "fail".into()));
+                lookup.push(("role_valid?".into(),   "NO — no role assignment on record".into(), "fail".into()));
+            }
+            let rule = "Contract CP-2 — AdminActionTaken requires RoleAssigned within 1-hour window".to_string();
+            if has_role && in_win {
+                CheckInfo { rule, lookup, result: "pass",
+                    result_text:   "✔ PASS".to_string(),
+                    result_detail: "Role is current — admin action is authorised".to_string() }
+            } else {
+                CheckInfo { rule, lookup, result: "fail",
+                    result_text:   "✘ CONTRACT VIOLATED".to_string(),
+                    result_detail: if !has_role {
+                        "No role assignment on record — privilege misuse detected".to_string()
+                    } else {
+                        let e = ev.ts - role_at.unwrap();
+                        format!("Role expired: assigned {}s ago, window is {}s — exceeded by {}s", e, CP_WINDOW, e - CP_WINDOW)
+                    }}
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -372,29 +589,42 @@ fn compute_check(ev: &Event, pre: Option<&AuthState>) -> CheckInfo {
 
 fn run_scenario() -> Vec<StepData> {
     let mut engine       = Engine::new();
+    let mut cp_engine    = ControlPlaneEngine::new();
     let mut steps        = Vec::new();
     let mut seq          = 0usize;
     let mut user_history: HashMap<String, Vec<(usize, u64, &'static str)>> = HashMap::new();
 
-    let script: &[(&str, &str, u64, &'static str, AuthEvent)] = &[
-        ("alice", "Scenario 1 — Happy Path",              0,   "alice", AuthEvent::LoginSuccess),
-        ("alice", "Scenario 1 — Happy Path",              10,  "alice", AuthEvent::AuthTokenIssued),
-        ("alice", "Scenario 1 — Happy Path",              120, "alice", AuthEvent::AuthTokenUsed),
-        ("bob",   "Scenario 2 — Token Without Login",     200, "bob",   AuthEvent::AuthTokenUsed),
-        ("dave",  "Scenario 3 — Session Expired",         400, "dave",  AuthEvent::LoginSuccess),
-        ("dave",  "Scenario 3 — Session Expired",         401, "dave",  AuthEvent::AuthTokenIssued),
-        ("dave",  "Scenario 3 — Session Expired",         720, "dave",  AuthEvent::AuthTokenUsed),
-        ("judy",  "Scenario 4 — Login Without Token",     900, "judy",  AuthEvent::LoginSuccess),
+    let script: Vec<(&str, &str, u64, &'static str, DomainEvent)> = vec![
+        // ── Identity domain — Scenario A (baseline) + violation cases ────────
+        ("alice",     "Scenario A — Legitimate Variation",  0,    "alice",     DomainEvent::Identity(IdentityEvent::LoginSuccess)),
+        ("alice",     "Scenario A — Legitimate Variation",  10,   "alice",     DomainEvent::Identity(IdentityEvent::AuthTokenIssued)),
+        ("alice",     "Scenario A — Legitimate Variation",  120,  "alice",     DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
+        ("bob",       "Scenario 2 — Token Without Login",   200,  "bob",       DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
+        ("dave",      "Scenario 3 — Session Expired",       400,  "dave",      DomainEvent::Identity(IdentityEvent::LoginSuccess)),
+        ("dave",      "Scenario 3 — Session Expired",       401,  "dave",      DomainEvent::Identity(IdentityEvent::AuthTokenIssued)),
+        ("dave",      "Scenario 3 — Session Expired",       720,  "dave",      DomainEvent::Identity(IdentityEvent::AuthTokenUsed)),
+        ("judy",      "Scenario 4 — Login Without Token",   900,  "judy",      DomainEvent::Identity(IdentityEvent::LoginSuccess)),
+        // ── ControlPlane domain — Scenario B (privilege misuse) ──────────────
+        ("svc_alpha", "Scenario B — Privilege Misuse",      1000, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_alpha", "Scenario B — Privilege Misuse",      1030, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        ("rogue_svc", "Scenario B — Privilege Misuse",      1100, "rogue_svc", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        ("svc_beta",  "Scenario B — Privilege Misuse",      1200, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_beta",  "Scenario B — Privilege Misuse",      5000, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
     ];
 
-    for (group, label, ts, user, kind) in script {
+    for (group, label, ts, user, kind) in &script {
         seq += 1;
-        let ev        = Event::new(*ts, user, kind.clone());
-        let pre_state = engine.state.get(ev.user).cloned();
-        let check     = compute_check(&ev, pre_state.as_ref());
-        let variances = engine.ingest(&ev);
-        let snap      = snapshot(&engine.state);
-        let phases    = NARRATIVES.get(seq - 1).copied().unwrap_or(&[]).to_vec();
+        let ev      = Event::new(*ts, user, kind.clone());
+        let id_pre  = engine.state.get(ev.entity).cloned();
+        let cp_pre  = cp_engine.state.get(ev.entity).cloned();
+        let check   = compute_check(&ev, id_pre.as_ref(), cp_pre.as_ref());
+        let variances = match ev.kind.domain() {
+            Domain::Identity     => engine.ingest(&ev),
+            Domain::ControlPlane => cp_engine.ingest(&ev),
+            _                    => vec![],
+        };
+        let snap   = snapshot(&engine.state, &cp_engine.state, *ts);
+        let phases = NARRATIVES.get(seq - 1).copied().unwrap_or(&[]).to_vec();
 
         user_history.entry(user.to_string()).or_default().push((seq, *ts, kind.name()));
         let history = user_history.get(*user).cloned().unwrap_or_default();
@@ -412,7 +642,7 @@ fn run_scenario() -> Vec<StepData> {
 
     for (user, var) in engine.finalize() {
         seq += 1;
-        let snap    = snapshot(&engine.state);
+        let snap    = snapshot(&engine.state, &cp_engine.state, 9999);
         let phases  = NARRATIVES.get(seq - 1).copied().unwrap_or(&[]).to_vec();
         let history = user_history.get(&user).cloned().unwrap_or_default();
         steps.push(StepData {
@@ -439,6 +669,15 @@ fn run_scenario() -> Vec<StepData> {
     steps
 }
 
+// ── Scenario metadata (POC document Section 6) ────────────────────────────────
+
+/// Declared scenario inputs + expected outcomes, matched against the POC document.
+/// Each future domain phase will add its own SCENARIO_X_JS constant.
+const SCENARIOS_JS: &str = r#"[
+  {id:"A",name:"Legitimate Variation",label:"Scenario A \u2014 Legitimate Variation",domain:"Identity",description:"Full authentication chain within 5-min window. No invariants broken.",expected:0},
+  {id:"B",name:"Privilege Misuse",label:"Scenario B \u2014 Privilege Misuse",domain:"ControlPlane",description:"Stealth admin actions without valid role assignments. Two Critical violations expected.",expected:2}
+]"#;
+
 // ── Serialize to JS ───────────────────────────────────────────────────────────
 
 fn steps_to_js(steps: &[StepData]) -> String {
@@ -460,12 +699,12 @@ fn steps_to_js(steps: &[StepData]) -> String {
             write!(out, "      {{severity:{},rule:{},detail:{}}},\n", js_str(v.severity), js_str(&v.rule), js_str(&v.detail)).unwrap();
         }
         out.push_str("    ],\n    state:{\n");
-        for (user, us) in &s.state_snap {
-            write!(out, "      {}:{{last_login:{},token_issued:{},token_used:{}}},\n",
-                js_str(user),
-                us.last_login.map(|t| t.to_string()).unwrap_or("null".into()),
-                us.token_issued.map(|t| t.to_string()).unwrap_or("null".into()),
-                us.token_used).unwrap();
+        for (entity, es) in &s.state_snap {
+            write!(out, "      {}:{{domain:{},fields:[", js_str(entity), js_str(es.domain)).unwrap();
+            for (k, v, cls) in &es.fields {
+                write!(out, "[{},{},{}],", js_str(k), js_str(v), js_str(cls)).unwrap();
+            }
+            out.push_str("]},\n");
         }
         out.push_str("    },\n    history:[\n");
         for (hseq, hts, hev) in &s.history {
@@ -611,6 +850,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 /* Check panel */
 .check-idle,.state-idle{height:100%;display:flex;align-items:center;justify-content:center;
   color:var(--dim);font-size:.72rem;text-align:center;padding:1rem}
+.state-domain-lbl{font-size:.55rem;color:var(--muted);margin-left:.35rem;text-transform:uppercase;letter-spacing:.06em}
 .check-hdr{font-size:.58rem;text-transform:uppercase;letter-spacing:.15em;color:var(--muted);font-weight:700;margin-bottom:.45rem}
 .check-rule{font-size:.7rem;color:var(--blue);margin-bottom:.65rem;line-height:1.5;
   border-left:2px solid var(--blue);padding-left:.45rem}
@@ -661,6 +901,19 @@ button:disabled{opacity:.4;cursor:not-allowed}
 #violation-flash{position:fixed;inset:0;background:rgba(255,51,85,0);pointer-events:none;
   transition:background .12s;z-index:100}
 #violation-flash.active{background:rgba(255,51,85,.16)}
+/* Scenario summary bar */
+.scenario-bar{flex-shrink:0;background:var(--surface);border-top:1px solid var(--border);
+  display:flex;flex-direction:column;padding:.25rem 1.25rem;font-size:.65rem;gap:.1rem}
+.sc-row{display:flex;align-items:center;gap:.6rem;padding:.1rem 0}
+.sc-id{color:var(--blue);font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.sc-name{color:var(--text)}
+.sc-domain{color:var(--muted);font-size:.6rem;text-transform:uppercase;letter-spacing:.08em}
+.sc-expected{color:var(--muted)}
+.sc-sep{color:var(--dim)}
+.sc-result{margin-left:auto;font-weight:700;font-size:.7rem;letter-spacing:.02em;transition:color .2s}
+.sc-result.pass{color:var(--green)}
+.sc-result.fail{color:var(--red)}
+.sc-result.pending{color:var(--muted);font-weight:400}
 /* Help button */
 #help-btn{border-color:var(--muted);color:var(--muted);padding:0;font-size:.75rem;
   width:1.85rem;height:1.85rem;border-radius:50%;justify-content:center;flex-shrink:0}
@@ -706,6 +959,26 @@ button:disabled{opacity:.4;cursor:not-allowed}
 
 const JS: &str = r#"
 const WINDOW_SECS = 300;
+
+// Populate scenario bar from SCENARIOS metadata
+(function(){
+  const bar = document.getElementById('sc-bar');
+  SCENARIOS.forEach(sc => {
+    const row = document.createElement('div');
+    row.className = 'sc-row';
+    row.innerHTML =
+      '<span class="sc-id">Scenario ' + sc.id + '</span>' +
+      '<span class="sc-sep">\u00b7</span>' +
+      '<span class="sc-name">' + sc.name + '</span>' +
+      '<span class="sc-sep">\u00b7</span>' +
+      '<span class="sc-domain">' + sc.domain + ' Domain</span>' +
+      '<span class="sc-sep">\u00b7</span>' +
+      '<span class="sc-expected">expected: ' + sc.expected + ' variance' + (sc.expected!==1?'s':'') + '</span>' +
+      '<span class="sc-result pending" id="sc-result-' + sc.id + '">awaiting run</span>';
+    bar.appendChild(row);
+  });
+})();
+
 let running = false;
 let stepMode = false;
 let stepResolve = null;
@@ -952,24 +1225,38 @@ function addViolCard(step, v){
 }
 
 function updateState(step){
-  const panel = document.getElementById('state-panel');
-  const users = Object.keys(step.state).sort();
-  panel.innerHTML = users.map(u => {
+  const panel    = document.getElementById('state-panel');
+  const entities = Object.keys(step.state).sort();
+  panel.innerHTML = entities.map(u => {
     const s = step.state[u];
-    const age = s.last_login !== null ? step.ts - s.last_login : null;
-    const inWin = age !== null && age <= WINDOW_SECS;
-    const lCls = s.last_login !== null ? (inWin ? 'ok' : 'fail') : 'none';
-    const lVal = s.last_login !== null ? `t=${s.last_login}s${!inWin?' ⚠':''}` : '—';
+    const rows = s.fields.map(([k,v,cls]) =>
+      `<div class="state-row"><span class="state-k">${k}</span><span class="state-v ${cls}">${v}</span></div>`
+    ).join('');
     return `<div class="state-card">
-      <div class="state-user">${u}</div>
-      <div class="state-row"><span class="state-k">last_login</span><span class="state-v ${lCls}">${lVal}</span></div>
-      <div class="state-row"><span class="state-k">token_issued</span><span class="state-v ${s.token_issued!==null?'ok':'none'}">${s.token_issued!==null?'t='+s.token_issued+'s':'—'}</span></div>
-      <div class="state-row"><span class="state-k">token_used</span><span class="state-v ${s.token_used?'ok':'none'}">${s.token_used?'yes':'no'}</span></div>
+      <div class="state-user">${u}<span class="state-domain-lbl">[${s.domain}]</span></div>
+      ${rows}
     </div>`;
   }).join('');
 }
 
+function updateScenarioResult(){
+  SCENARIOS.forEach(sc => {
+    const steps  = STEPS.filter(s => s.group_label === sc.label);
+    const actual = steps.reduce((n,s) => n + s.variances.length, 0);
+    const el     = document.getElementById('sc-result-' + sc.id);
+    if(!el) return;
+    if(actual === sc.expected){
+      el.textContent = '\u2714 PASS \u2014 ' + actual + ' variance' + (actual!==1?'s':'');
+      el.className = 'sc-result pass';
+    } else {
+      el.textContent = '\u2718 FAIL \u2014 expected ' + sc.expected + ', got ' + actual;
+      el.className = 'sc-result fail';
+    }
+  });
+}
+
 function showComplete(){
+  updateScenarioResult();
   const crit = STEPS.reduce((n,s) => n + s.variances.filter(v => v.severity==='critical').length, 0);
   const warn = STEPS.reduce((n,s) => n + s.variances.filter(v => v.severity==='warning').length, 0);
   const clean = STEPS.filter(s => s.variances.length === 0).length;
@@ -993,6 +1280,12 @@ function resetAll(){
   document.getElementById('state-panel').innerHTML  = '<div class="state-idle">State will appear as events are processed</div>';
   document.getElementById('viol-cards').innerHTML   = '';
   document.getElementById('viol-count').textContent = '0';
+  SCENARIOS.forEach(sc => {
+    const el = document.getElementById('sc-result-' + sc.id);
+    if(!el) return;
+    el.textContent = 'awaiting run';
+    el.className   = 'sc-result pending';
+  });
 }
 
 document.getElementById('play-btn').addEventListener('click',  () => startDemo(false));
@@ -1023,7 +1316,7 @@ document.getElementById('reset-btn').addEventListener('click', () => {
 
 // ── HTML ──────────────────────────────────────────────────────────────────────
 
-fn generate_html(steps_js: &str) -> String {
+fn generate_html(steps_js: &str, scenarios_js: &str) -> String {
     format!(
 r#"<!DOCTYPE html>
 <html lang="en">
@@ -1129,6 +1422,8 @@ r#"<!DOCTYPE html>
   </div>
 </div>
 
+<div class="scenario-bar" id="sc-bar"></div>
+
 <div class="violations-section">
   <div class="viol-header">
     <span class="viol-title">Variance Log</span>
@@ -1139,13 +1434,15 @@ r#"<!DOCTYPE html>
 
 <script>
 const STEPS={steps};
+const SCENARIOS={scenarios};
 {js}
 </script>
 </body>
 </html>"#,
-        css   = CSS,
-        steps = steps_js,
-        js    = JS,
+        css       = CSS,
+        steps     = steps_js,
+        scenarios = scenarios_js,
+        js        = JS,
     )
 }
 
@@ -1154,7 +1451,7 @@ const STEPS={steps};
 fn main() {
     let steps    = run_scenario();
     let steps_js = steps_to_js(&steps);
-    let html     = generate_html(&steps_js);
+    let html     = generate_html(&steps_js, SCENARIOS_JS);
     std::fs::write("dashboard.html", html).expect("cannot write dashboard.html");
     println!("Dashboard → dashboard.html");
     std::process::Command::new("cmd").args(["/c", "start", "", "dashboard.html"]).spawn().ok();
