@@ -65,306 +65,360 @@ static NARRATIVES: &[&[Phase]] = &[
     &[
         ("Event Arrives",
          "RoleAssigned — svc_alpha @ t=1000s",
-         "The ControlPlane engine receives its first event: svc_alpha has been \
-          granted a role. Contract CP-2 states that any AdminActionTaken must be \
-          backed by a RoleAssigned within the 1-hour validity window. \
-          The engine records the assignment timestamp and opens the window."),
-        ("State Lookup",
-         "Creating svc_alpha's ControlPlane state",
-         "No prior entry exists for svc_alpha. The engine initialises: \
-          role_assigned_at=1000, admin_action_taken=false. \
-          The 1-hour validity window runs t=1000s → t=4600s. \
-          Role assignment triggers no immediate check."),
+         "Scenario A (POC §6) tests three legitimate variations across three domains. \
+          Variation 1 — Approved privilege elevation: svc_alpha is granted a role. \
+          Under POC Domain 1 (Identity & Privileged Access), a control-plane action \
+          must be causally attributable to a valid authority chain. \
+          This role grant establishes that chain."),
+        ("POC Invariant",
+         "Domain 1 — Authority chain prerequisite",
+         "POC Domain 1 invariant: \
+          'A control-plane action with material infrastructure impact must be \
+          causally attributable to a valid authority chain and declared operational scope.' \
+          Engine records role_assigned_at=1000. Authority window: t=1000 → t=4600s. \
+          Contract defers — no violation possible until AdminActionTaken arrives."),
         ("Invariant Result",
-         "⏳ Pending — role window is open",
-         "The role is recorded. The engine is now watching for AdminActionTaken \
-          from svc_alpha. Any such event arriving before t=4600s will be \
-          considered authorised. After that, the role is stale."),
+         "⏳ Pending — authority chain opened",
+         "Role on record. The engine watches for AdminActionTaken within the 1-hour window. \
+          This is the approved privilege elevation baseline: \
+          the causal chain starts with a legitimate, declared grant. \
+          Variation 1 of Scenario A is in progress."),
     ],
     // ── Step 2: AdminActionTaken(svc_alpha, t=1030) ── Scenario A ────────────
     &[
         ("Event Arrives",
          "AdminActionTaken — svc_alpha @ t=1030s",
-         "svc_alpha performs an admin action 30 seconds after role assignment. \
-          Contract CP-2 fires: the engine checks that a valid RoleAssigned exists \
-          within the 1-hour window. The lookup runs now."),
-        ("State Lookup",
-         "Checking svc_alpha's role state",
-         "svc_alpha.role_assigned_at=1000. Elapsed since assignment: 30s. \
-          Window: 3600s. 30 < 3600 — the role is current. \
-          Contract CP-2 is satisfied. State updated: admin_action_taken=true."),
+         "svc_alpha acts 30 seconds after its role was granted — \
+          well within the 1-hour authority window. \
+          This closes variation 1: approved privilege elevation (POC §6, Scenario A). \
+          The action is causally attributable to a valid authority chain \
+          and declared operational scope — exactly what POC Domain 1 requires."),
+        ("POC Invariant",
+         "Domain 1 — Control-plane action requires current authority",
+         "POC Domain 1 invariant check: role_assigned_at=1000, action at t=1030, \
+          elapsed=30s, window=3600s. 30 < 3600 ✔. \
+          Causal chain: RoleAssigned(t=1000) → AdminActionTaken(t=1030). \
+          Authority is current. Contract CP-2 satisfied."),
         ("Invariant Result",
-         "✔ Pass — admin action is authorised",
-         "svc_alpha's action is backed by a valid, recent role assignment. \
-          This is Scenario A — the legitimate variation: a properly authorised \
-          service account acts within its declared privilege window. \
-          Role assigned → Admin action taken. No invariant violation."),
+         "✔ All clear — approved privilege elevation confirmed",
+         "Zero violations. Variation 1 cleared. The engine passes authorised privilege use \
+          without a false positive — a prerequisite for the POC to be trusted. \
+          POC Domain 1 detects: 'Credential-valid misuse · Escalation outside declared authority.' \
+          Here, authority is fully declared and current."),
     ],
-    // ── Step 3: AdminActionTaken(rogue_svc, t=1100) ── Scenario B ────────────
+    // ── Step 3: WorkloadScheduled(rack_a, t=2000) ── Scenario A ──────────────
     &[
         ("Event Arrives",
-         "AdminActionTaken — rogue_svc @ t=1100s",
-         "rogue_svc attempts an admin action. This is the first event the engine \
-          has ever seen from this service account — there is no role assignment \
-          on record. Contract CP-2 fires immediately: has rogue_svc been \
-          granted a role?"),
-        ("State Lookup",
-         "Looking up rogue_svc — no state found",
-         "rogue_svc has no entry in the ControlPlane state store. \
-          No RoleAssigned. No authorisation chain whatsoever. \
-          Yet a privileged admin action is being attempted. \
-          This is stealth privilege misuse — the defining Scenario B pattern."),
+         "WorkloadScheduled — rack_a @ t=2000s",
+         "Variation 2 — Authorised workload surge (POC §6, Scenario A). \
+          rack_a explicitly declares a high-demand workload before its temperature rises. \
+          The scheduler states its intent before imposing physical load. \
+          POC Domain 3 (Workload–Thermal Equilibrium): \
+          'Bias is not prohibited. Unjustified bias is.' \
+          This declaration is the causal justification for any thermal bias that follows."),
+        ("POC Invariant",
+         "Domain 3 — Workload declaration opens justification window",
+         "POC Domain 3 invariant: \
+          'Sustained asymmetric GPU density producing persistent thermal bias must be \
+          causally attributable to declared workload demand or authorised scheduling logic.' \
+          Engine records last_workload_at=2000. Justification window: 1800s. \
+          Any ThermalReading above 50°C from rack_a within this window is causally explained."),
         ("Invariant Result",
-         "✘ Critical — admin action without role assignment",
-         "Hard causal failure: a privileged action was taken by a service account \
-          that was never granted a role. The contract is explicit: AdminActionTaken \
-          MUST have a prior RoleAssigned. None exists. \
-          In a real deployment: immediate alert, lateral movement suspected."),
+         "⏳ Pending — thermal justification window open",
+         "Workload declared. The engine distinguishes authorised load from silent scheduler bias. \
+          rack_a has stated its intent — thermal impact is expected. \
+          This is the contrast the POC is built around: \
+          the same temperature reading is a pass here and a violation in Scenario C."),
     ],
-    // ── Step 4: RoleAssigned(svc_beta, t=1200) ── Scenario B ─────────────────
+    // ── Step 4: ThermalReading(rack_a, 52°C, t=2300) ── Scenario A ───────────
     &[
         ("Event Arrives",
-         "RoleAssigned — svc_beta @ t=1200s",
-         "svc_beta receives a role assignment at t=1200s. This opens a 1-hour \
-          validity window expiring at t=4800s. The engine records this and \
-          waits. What happens if svc_beta's admin action arrives after the window closes?"),
-        ("State Lookup",
-         "Creating svc_beta's ControlPlane state",
-         "svc_beta.role_assigned_at=1200, admin_action_taken=false. \
-          Window: [1200s, 4800s]. Everything is in order for now. \
-          The engine records the assignment and notes the critical deadline: t=4800s."),
+         "ThermalReading — rack_a @ t=2300s, 52°C",
+         "rack_a reports 52°C — 2°C above the 50°C threshold — 300 seconds after \
+          declaring its workload surge. The elevated temperature has a declared cause. \
+          POC Domain 3: 'Unjustified bias is prohibited' — but this bias is justified \
+          by the WorkloadScheduled at t=2000."),
+        ("POC Invariant",
+         "Domain 3 — Thermal bias must be causally attributable to declared workload",
+         "POC Domain 3 invariant check: temp=52°C > threshold=50°C (biased ✔), \
+          WorkloadScheduled at t=2000, elapsed=300s, window=1800s. 300 < 1800 ✔. \
+          Bias is causally attributable to declared workload demand. \
+          Contract TH-1 satisfied. bias_count stays at 0."),
         ("Invariant Result",
-         "⏳ Pending — window closes at t=4800s",
-         "Same deferred pattern as svc_alpha's first event. \
-          The next AdminActionTaken from svc_beta will be the deciding moment. \
-          If it arrives after t=4800s, Contract CP-2 will fail — expired role."),
+         "✔ All clear — authorised workload surge confirmed",
+         "Zero violations. Variation 2 cleared. The engine correctly distinguishes \
+          justified elevated temperature from unjustified bias. \
+          A threshold-based tool sees '52°C — elevated.' \
+          The causal engine sees '52°C, workload declared 300s ago, justified.' \
+          This distinction is the POC's core value proposition."),
     ],
-    // ── Step 5: AdminActionTaken(svc_beta, t=5000) ── Scenario B ─────────────
+    // ── Step 5: StateValidated(orchestrator, t=3000) ── Scenario A ───────────
     &[
         ("Event Arrives",
-         "AdminActionTaken — svc_beta @ t=5000s",
-         "svc_beta attempts an admin action at t=5000s. The role was assigned \
-          at t=1200s. The window expired at t=4800s. \
-          The engine calculates: 5000 − 1200 = 3800s since assignment. \
-          The window is 3600s. svc_beta is 200 seconds past the deadline."),
-        ("State Lookup",
-         "svc_beta.role_assigned_at=1200s, elapsed=3800s, window=3600s",
-         "3800 > 3600. The role has expired. The engine does not care that the \
-          role was legitimately assigned — what matters is the age of the \
-          RoleAssigned at the time of the admin action. \
-          At t=5000s, svc_beta's role is stale by exactly 200 seconds."),
+         "StateValidated — orchestrator @ t=3000s",
+         "Variation 3 — Declared scheduling shift (POC §6, Scenario A). \
+          The orchestrator ('Mother') validates system state before triggering automation. \
+          POC Domain 4 (Automation Amplification Guard): \
+          'Automated remediation must be causally justified by validated system state \
+          and must not amplify unexplained deviations.' \
+          This validation is that justification."),
+        ("POC Invariant",
+         "Domain 4 — Automation requires fresh StateValidated",
+         "POC Domain 4 invariant: \
+          'Automated remediation must be causally justified by validated system state.' \
+          Engine records last_validated_at=3000, trigger_count reset to 0. \
+          Validation window: 300s. \
+          Note: this timestamp also anchors Scenario D — \
+          the orchestrator will not re-validate before triggering again at t=11000s."),
         ("Invariant Result",
-         "✘ Critical — role expired, admin action denied",
-         "Contract CP-2 violated. Deterministic proof: 5000 − 1200 = 3800 > 3600. \
-          The role assignment is outside the validity window at the time of action. \
-          This could represent a delayed execution, a stale credential being replayed, \
-          or a service that held an elevated role past its intended validity period."),
+         "⏳ Pending — automation validation window open",
+         "System state confirmed coherent. The declared scheduling shift posture is set. \
+          Any AutomationTriggered within 5 minutes is acting on confirmed, coherent state. \
+          This is variation 3: 'Mother' acting on validated information — \
+          the correct behaviour the POC must pass cleanly."),
     ],
-    // ── Step 6: WorkloadScheduled(rack_a, t=6000) ── Scenario C ──────────────
+    // ── Step 6: AutomationTriggered(orchestrator, t=3100) ── Scenario A ──────
     &[
         ("Event Arrives",
-         "WorkloadScheduled — rack_a @ t=6000s",
-         "Scenario C begins: the Thermal engine receives a workload declaration for rack_a. \
-          Contract TH-1 states that any sustained thermal bias must be causally attributable \
-          to a declared workload. This declaration opens a 30-minute justification window. \
-          Any thermal reading above threshold within that window will be considered justified."),
-        ("State Lookup",
-         "Creating rack_a's thermal state",
-         "No prior entry exists for rack_a. The engine initialises: \
-          last_workload_at=6000, bias_count=0, last_temp=null. \
-          The justification window runs t=6000s → t=7800s. \
-          WorkloadScheduled triggers no immediate contract check."),
+         "AutomationTriggered — orchestrator @ t=3100s",
+         "The orchestrator triggers an automated action 100 seconds after validating state — \
+          acting on recently confirmed, coherent system information. \
+          This closes variation 3: declared scheduling shift (POC §6, Scenario A). \
+          POC Domain 4: automation acting on verified state is the passing case."),
+        ("POC Invariant",
+         "Domain 4 — AutomationTriggered backed by fresh StateValidated",
+         "POC Domain 4 invariant check: StateValidated at t=3000, \
+          elapsed=100s, window=300s. 100 < 300 ✔. trigger_count=0. \
+          The automation is causally justified by validated system state. \
+          Contract AUTO-1 satisfied."),
         ("Invariant Result",
-         "⏳ Pending — justification window is open",
-         "The workload is declared. The engine now watches for ThermalReading events \
-          from rack_a. Any reading above the 50°C threshold (nominal 45 + bias 5) \
-          within the next 1800 seconds will be treated as causally justified. \
-          After t=7800s, the justification expires."),
+         "✔ All clear — declared scheduling shift confirmed",
+         "Scenario A complete. All three variations cleared: \
+          approved privilege elevation ✔, authorised workload surge ✔, declared scheduling shift ✔. \
+          Zero violations across three domains. \
+          POC §6: 'Expected: no invariant violation.' \
+          The detection layer produces no false positives on authorised behaviour."),
     ],
-    // ── Step 7: ThermalReading(rack_a, 52°C, t=6300) ── Scenario C ───────────
+    // ── Step 7: AdminActionTaken(rogue_svc, t=4000) ── Scenario B ────────────
     &[
         ("Event Arrives",
-         "ThermalReading — rack_a @ t=6300s, 52°C",
-         "rack_a reports 52°C — 7°C above nominal (45°C) and above the 50°C threshold. \
-          This is a biased reading. Contract TH-1 fires: the engine checks whether \
-          a WorkloadScheduled exists within the 30-minute justification window."),
-        ("State Lookup",
-         "Checking rack_a's workload justification",
-         "rack_a.last_workload_at=6000. Elapsed since declaration: 300s. \
-          Window: 1800s. 300 < 1800 — the workload is current. \
-          temp=52°C > threshold (50°C) — biased, but justified. \
-          Contract TH-1 is satisfied. This is the expected outcome for a legitimately loaded rack."),
+         "AdminActionTaken — rogue_svc @ t=4000s",
+         "Scenario B — Privilege Misuse (POC §6). \
+          rogue_svc attempts a control-plane admin action with no role on record. \
+          This is 'credential-valid escalation' (POC §6, Scenario B): \
+          the actor carries valid system credentials but was never granted a role. \
+          POC Domain 1 detection target: 'Credential-valid misuse · Escalation outside declared authority.'"),
+        ("POC Invariant",
+         "Domain 1 — Control-plane action requires prior RoleAssigned",
+         "POC Domain 1 invariant: \
+          'A control-plane action must be causally attributable to a valid authority chain \
+          and declared operational scope.' \
+          rogue_svc: no RoleAssigned on record. No authority chain. \
+          The causal prerequisite is completely absent. \
+          Contract CP-1 violated — Critical."),
         ("Invariant Result",
-         "✔ Pass — thermal bias is causally justified",
-         "rack_a's elevated temperature is explained by the declared workload. \
-          This is the Scenario C baseline: bias is permitted when justified. \
-          The engine does not flag this reading. \
-          Now watch what happens when rack_b — with no declared workload — also runs hot."),
+         "✘ Issue detected — credential-valid escalation",
+         "IAM invariant violated (POC §6, Scenario B expected: 'IAM invariant violation'). \
+          A control-plane action taken with no authority chain. \
+          A credential check passes — rogue_svc has valid credentials. \
+          The causal engine catches what credentials alone cannot: \
+          the absence of a declared, current authority chain."),
     ],
-    // ── Step 8: ThermalReading(rack_b, 56°C, t=6600) ── Scenario C ───────────
+    // ── Step 8: RoleAssigned(svc_beta, t=4200) ── Scenario B ─────────────────
     &[
         ("Event Arrives",
-         "ThermalReading — rack_b @ t=6600s, 56°C",
-         "rack_b reports 56°C. This is the first event the engine has ever seen from rack_b. \
-          temp=56°C is 11°C above nominal and 6°C above the 50°C threshold — clearly biased. \
-          Contract TH-1 fires: has rack_b declared a workload within the justification window?"),
-        ("State Lookup",
-         "Looking up rack_b — no workload on record",
-         "rack_b has no entry in the thermal state store. No WorkloadScheduled. \
-          No justification for the elevated temperature whatsoever. \
-          Yet rack_b is running 11°C above nominal. \
-          This is the silent scheduler bias pattern: heat without declared cause."),
+         "RoleAssigned — svc_beta @ t=4200s",
+         "svc_beta receives a legitimate role grant at t=4200s. \
+          This sets up the second Scenario B detection: \
+          'out-of-scope control-plane mutation' (POC §6). \
+          The role is valid now — but the admin action that follows \
+          will arrive 200 seconds after the 1-hour window expires. \
+          'Credential-valid does not mean currently authorised.'"),
+        ("POC Invariant",
+         "Domain 1 — Authority window: t=4200 → t=7800s",
+         "Engine records role_assigned_at=4200. \
+          Authority window: t=4200 → t=7800s (1-hour / 3600s). \
+          The role is legitimately assigned. \
+          The engine watches: at t=8000s — 200 seconds after window expiry — \
+          svc_beta will act. Deterministic proof: 8000 − 4200 = 3800 > 3600."),
         ("Invariant Result",
-         "⚠ Warning — unjustified thermal bias (first detection)",
-         "Contract TH-1 partially violated. bias_count=1. \
-          rack_b's temperature exceeds threshold with no workload justification on record. \
-          The engine flags this as a Warning — the first occurrence is insufficient \
-          to confirm sustained bias. The engine continues watching for further readings."),
+         "⏳ Pending — window closes at t=7800s",
+         "Role on record. The stage is set for out-of-scope mutation detection. \
+          POC Domain 1 invariant: authority must be valid at the moment of action. \
+          The engine does not care that the role was legitimately granted — \
+          what matters is whether it is current when the action arrives."),
     ],
-    // ── Step 9: ThermalReading(rack_b, 61°C, t=7200) ── Scenario C ───────────
+    // ── Step 9: AdminActionTaken(svc_beta, t=8000) ── Scenario B ─────────────
     &[
         ("Event Arrives",
-         "ThermalReading — rack_b @ t=7200s, 61°C",
-         "rack_b reports 61°C — now 16°C above nominal. Still no WorkloadScheduled \
-          for rack_b has arrived. The engine rechecks Contract TH-1: \
-          same entity, same pattern, escalating temperature. bias_count is now 2."),
-        ("State Lookup",
-         "rack_b.last_workload=NONE, temp=61°C, bias_count → 2",
-         "600 seconds have passed since the first biased reading. \
-          No workload has been declared for rack_b. \
-          temp=61°C > 50°C threshold. bias_count increments to 2. \
-          Two consecutive unjustified readings cross the sustained bias threshold."),
+         "AdminActionTaken — svc_beta @ t=8000s",
+         "svc_beta acts at t=8000s — 200 seconds after its authority window closed at t=7800s. \
+          This is 'out-of-scope control-plane mutation' (POC §6, Scenario B): \
+          an action taken outside the declared operational scope. \
+          The role was legitimately granted; it is no longer current."),
+        ("POC Invariant",
+         "Domain 1 — Declared operational scope exceeded",
+         "POC Domain 1 invariant check: role_assigned_at=4200, action at t=8000, \
+          elapsed=3800s, window=3600s. 3800 > 3600 — exceeded by 200s. \
+          Authority has lapsed. \
+          'A control-plane action must be causally attributable to a valid authority chain \
+          and declared operational scope.' The scope has expired. Contract CP-2 violated — Critical."),
         ("Invariant Result",
-         "✘ Critical — sustained equilibrium invariant violated",
-         "Contract TH-2 violated. Deterministic proof: 2 consecutive ThermalReadings \
-          above threshold with no WorkloadScheduled justification. \
-          This is not a spike — it is a sustained pattern. \
-          In a real deployment: immediate escalation, scheduler audit required."),
+         "✘ Issue detected — out-of-scope control-plane mutation",
+         "IAM invariant violated. Out-of-scope mutation confirmed. \
+          Scenario B complete — 2 Critical violations: \
+          credential-valid escalation (no authority chain) and \
+          out-of-scope mutation (expired authority). \
+          POC §1: 'Detect privilege-to-impact inconsistencies' — demonstrated. \
+          Standard access logs would show a credentialed action; the causal layer shows an unauthorised one."),
     ],
-    // ── Step 10: ThermalReading(rack_b, 64°C, t=7800) ── Scenario C ──────────
+    // ── Step 10: ThermalReading(rack_b, 56°C, t=9000) ── Scenario C ──────────
     &[
         ("Event Arrives",
-         "ThermalReading — rack_b @ t=7800s, 64°C",
-         "rack_b reaches 64°C — 19°C above nominal. The temperature is still rising. \
-          Still no workload declaration. The engine applies Contract TH-2 again: \
-          this is the third consecutive unjustified reading. The bias is definitive."),
-        ("State Lookup",
-         "rack_b.last_workload=NONE, temp=64°C, bias_count → 3",
-         "rack_b has now produced 3 consecutive ThermalReadings above the 50°C threshold \
-          with zero workload justification. The scheduler has silently biased load \
-          onto rack_b without declaring any intent. \
-          The causal chain is broken: thermal impact without declared digital cause."),
+         "ThermalReading — rack_b @ t=9000s, 56°C",
+         "Scenario C — Silent Scheduler Bias (POC §6). \
+          rack_b reports 56°C with no WorkloadScheduled ever declared for this rack. \
+          'Sustained rack skew · No declared workload shift.' \
+          The scheduler has imposed thermal load on rack_b without declaring intent. \
+          POC Domain 2 detection target: 'Silent scheduler bias · Subtle control-plane manipulation.'"),
+        ("POC Invariant",
+         "Domain 3 — Thermal bias must be causally attributable to declared workload",
+         "POC Domain 3 invariant: \
+          'Sustained asymmetric GPU density producing persistent thermal bias must be \
+          causally attributable to declared workload demand or authorised scheduling logic.' \
+          rack_b: no workload on record. temp=56°C > threshold=50°C. \
+          No causal justification. bias_count → 1. Contract TH-1 fires."),
         ("Invariant Result",
-         "✘ Critical — silent scheduler bias proven",
-         "Contract TH-2 confirmed: sustained asymmetric thermal bias without declared workload. \
-          3 readings (56°C → 61°C → 64°C), no WorkloadScheduled, no justification. \
-          Every detection is a deterministic causal proof — the engine did not guess. \
-          It observed a broken causal chain and reported it."),
+         "⚠ Warning — control-plane invariant triggered",
+         "First detection: rack skew without declared workload. \
+          POC §6, Scenario C expected: 'Control-plane and equilibrium invariant violation.' \
+          The causal gap is the signal — not the temperature value alone. \
+          A threshold tool might not alert on 56°C. \
+          The causal engine detects the absence of a declared cause on the first reading."),
     ],
-    // ── Step 11: StateValidated(orchestrator, t=9000) ── Scenario D ──────────
+    // ── Step 11: ThermalReading(rack_b, 61°C, t=9600) ── Scenario C ──────────
     &[
         ("Event Arrives",
-         "StateValidated — orchestrator @ t=9000s",
-         "Scenario D begins: the Automation engine receives a state validation event. \
-          Mother has audited system state and confirmed coherence. \
-          Contract AUTO-1 states that every AutomationTriggered must be backed by a \
-          StateValidated within a 5-minute window. This validation opens that window."),
-        ("State Lookup",
-         "Creating orchestrator's automation state",
-         "No prior entry exists for orchestrator. The engine initialises: \
-          last_validated_at=9000, trigger_count=0, last_trigger_at=null. \
-          The validation window runs t=9000s → t=9300s. \
-          StateValidated triggers no immediate contract check."),
+         "ThermalReading — rack_b @ t=9600s, 61°C",
+         "rack_b reaches 61°C — 600 seconds since the first unjustified reading. \
+          Still no WorkloadScheduled declared. The bias is sustained, not a transient spike. \
+          POC §1 Objective: 'Detect unjustified workload-induced physical bias.' \
+          POC Domain 2: 'Sustained workload redistribution must be causally attributable \
+          to declared scheduling objectives.' No scheduling objective was declared."),
+        ("POC Invariant",
+         "Domain 3 — Sustained bias triggers equilibrium invariant",
+         "POC Domain 3 invariant escalation: bias_count → 2. \
+          Two consecutive unjustified readings (56°C → 61°C). \
+          The equilibrium invariant now applies: \
+          'Sustained asymmetric GPU density producing persistent thermal bias.' \
+          Contract TH-2: 'Sustained unjustified thermal bias — equilibrium invariant violated.'"),
         ("Invariant Result",
-         "⏳ Pending — validation window is open",
-         "System state is confirmed coherent. The engine is now watching for \
-          AutomationTriggered events from orchestrator. Any trigger arriving \
-          before t=9300s is considered to be acting on validated state. \
-          After t=9300s, the validation expires and any trigger becomes unjustified."),
+         "✘ Issue detected — equilibrium invariant violated",
+         "Both invariants now breached: control-plane invariant (no workload declared) \
+          and equilibrium invariant (bias sustained across consecutive readings). \
+          POC §1: 'Surface stealth manipulations that evade threshold and correlational tools.' \
+          No individual reading triggers a hard alarm — the sustained causal gap does. \
+          This is a detection pattern conventional monitoring cannot produce."),
     ],
-    // ── Step 12: AutomationTriggered(orchestrator, t=9100) ── Scenario D ─────
+    // ── Step 12: ThermalReading(rack_b, 64°C, t=10200) ── Scenario C ─────────
     &[
         ("Event Arrives",
-         "AutomationTriggered — orchestrator @ t=9100s",
-         "Mother triggers a remediation action 100 seconds after state validation. \
-          Contract AUTO-1 fires: is there a StateValidated within the 5-minute window? \
-          At t=9100s the window is open — 200 seconds remain. The check runs now."),
-        ("State Lookup",
-         "Checking orchestrator's validation state",
-         "orchestrator.last_validated_at=9000. Elapsed since validation: 100s. \
-          Window: 300s. 100 < 300 — validation is fresh. trigger_count stays at 0. \
-          This trigger is causally justified by the preceding state validation."),
+         "ThermalReading — rack_b @ t=10200s, 64°C",
+         "rack_b reaches 64°C — 1200 seconds of sustained, undeclared thermal bias. \
+          Three consecutive readings (56 → 61 → 64°C) with no WorkloadScheduled at any point. \
+          POC Domain 2 detection target: 'Silent scheduler bias · Undeclared policy drift.' \
+          The scheduler silently routed load to rack_b with no declared scheduling objective."),
+        ("POC Invariant",
+         "Domains 2+3 — Proxy OT impact without direct OT compromise",
+         "bias_count → 3. Causal chain from scheduler intent to physical impact: absent. \
+          POC Domain 3 detection target: 'Proxy OT impact without direct OT compromise.' \
+          The Thermal domain acts as OT-Proxy: physical impact (rising rack temperature) \
+          is traceable to an IT-origin action (scheduler decision) through the causal layer — \
+          without any direct OT system being compromised."),
         ("Invariant Result",
-         "✔ Pass — automation is acting on validated state",
-         "Contract AUTO-1 satisfied: Mother's remediation is backed by a valid, \
-          recent state validation. This is the expected pattern — automation \
-          acting on confirmed, coherent state. \
-          Now watch what happens after the validation window expires."),
+         "✘ Issue detected — silent scheduler bias proven",
+         "Scenario C confirmed — 3 violations (1 Warning + 2 Critical). \
+          POC §6: 'Expected: Control-plane and equilibrium invariant violation.' ✔ \
+          POC §1: 'Detect unjustified workload-induced physical bias' — demonstrated. \
+          POC §1: 'Surface stealth manipulations that evade threshold tools' — demonstrated. \
+          A single-point threshold monitor needs all three readings to be alarming; \
+          the causal engine detected the gap on the first reading."),
     ],
-    // ── Step 13: AutomationTriggered(orchestrator, t=9400) ── Scenario D ─────
+    // ── Step 13: AutomationTriggered(orchestrator, t=11000) ── Scenario D ─────
     &[
         ("Event Arrives",
-         "AutomationTriggered — orchestrator @ t=9400s",
-         "Mother triggers again at t=9400s. The last validation was at t=9000s — \
-          400 seconds ago. The window is 300 seconds. \
-          The validation has expired. No new StateValidated has arrived. \
-          Contract AUTO-1 fires: is this trigger justified?"),
-        ("State Lookup",
-         "orchestrator.last_validated=9000s, elapsed=400s, window=300s",
-         "400 > 300. The validation has expired by 100 seconds. \
-          No StateValidated has arrived since t=9000s, yet automation is still firing. \
-          trigger_count → 1 (first stale trigger). \
-          The previous remediation did not resolve the underlying issue."),
+         "AutomationTriggered — orchestrator @ t=11000s",
+         "Scenario D — Automation Amplification (POC §6). \
+          The orchestrator fires at t=11000s. \
+          Last StateValidated: t=3000s (Scenario A) — 8000 seconds ago. \
+          'Automated response to incomplete state.' \
+          POC Domain 4 detection target: 'Automation feedback instability · \
+          AI reacting to manipulated telemetry.'"),
+        ("POC Invariant",
+         "Domain 4 — Automation requires StateValidated within 5-min window",
+         "POC Domain 4 invariant: \
+          'Automated remediation must be causally justified by validated system state \
+          and must not amplify unexplained deviations.' \
+          last_validated_at=3000, elapsed=8000s, window=300s. \
+          8000 >> 300 — validation expired 7700s ago. trigger_count → 1. \
+          Contract AUTO-1 fires: automation on unvalidated state."),
         ("Invariant Result",
-         "⚠ Warning — automation acting on stale state",
-         "Contract AUTO-1 partially violated. trigger_count=1. \
-          Mother is triggering remediation on system state that has not been \
-          re-validated since t=9000s. The first occurrence is flagged as a Warning. \
-          The engine continues watching: will state be re-validated, or will \
-          the automation keep firing into the void?"),
+         "⚠ Warning — automated response to incomplete state",
+         "Automation invariant partially triggered. \
+          POC §6, Scenario D expected: 'Automation invariant violation.' \
+          The orchestrator ('Mother') cannot distinguish acting on real current state \
+          from acting on stale — or attacker-modified — state. \
+          The causal engine can. trigger_count=1: monitoring for amplification cascade."),
     ],
-    // ── Step 14: AutomationTriggered(orchestrator, t=9600) ── Scenario D ─────
+    // ── Step 14: AutomationTriggered(orchestrator, t=11200) ── Scenario D ─────
     &[
         ("Event Arrives",
-         "AutomationTriggered — orchestrator @ t=9600s",
-         "Mother triggers a third time at t=9600s. Still no StateValidated \
-          since t=9000s — now 600 seconds ago, twice the window. \
-          trigger_count → 2. Contract AUTO-2 fires: this is a cascade."),
-        ("State Lookup",
-         "orchestrator.last_validated=9000s, elapsed=600s, trigger_count → 2",
-         "600 > 300. Validation expired 300 seconds ago. \
-          Two consecutive triggers on unvalidated state. \
-          The underlying deviation has not been resolved by prior remediations. \
-          Mother is not correcting the problem — it is amplifying it."),
+         "AutomationTriggered — orchestrator @ t=11200s",
+         "The orchestrator triggers again — 200 seconds after the first stale trigger. \
+          No StateValidated since t=3000s. \
+          Each automated action may modify environment state, \
+          but the system never re-checks whether the modification resolved the issue. \
+          POC Domain 4 detection target: 'Automation feedback instability.'"),
+        ("POC Invariant",
+         "Domain 4 — Amplification invariant: repeated triggers on unvalidated state",
+         "trigger_count → 2. Two consecutive AutomationTriggered with no intervening StateValidated. \
+          Contract AUTO-2: \
+          'Repeated automation on unvalidated state — amplification invariant violated.' \
+          POC Domain 4: 'Automated remediation must not amplify unexplained deviations.' \
+          The system is in a feedback loop it cannot self-correct."),
         ("Invariant Result",
-         "✘ Critical — automation cascade detected",
-         "Contract AUTO-2 violated. Deterministic proof: 2 consecutive AutomationTriggered \
-          events on state that has not been re-validated. \
-          This is the automation amplification pattern: the AI is reacting to \
-          manipulated or incoherent telemetry, repeatedly, without confirmation \
-          that its actions are having any effect."),
+         "✘ Issue detected — amplification invariant violated",
+         "Automation amplification invariant violated. \
+          POC §1: 'Detect automation acting on unverified state' — demonstrated. \
+          Each trigger potentially compounds the deviation. \
+          In a real AI-factory: 'Mother' acting confidently and repeatedly \
+          on incoherent telemetry — amplifying rather than resolving the problem."),
     ],
-    // ── Step 15: AutomationTriggered(orchestrator, t=9900) ── Scenario D ─────
+    // ── Step 15: AutomationTriggered(orchestrator, t=11400) ── Scenario D ─────
     &[
         ("Event Arrives",
-         "AutomationTriggered — orchestrator @ t=9900s",
-         "Mother triggers a fourth time at t=9900s. 900 seconds since last validation — \
-          three times the window. trigger_count → 3. \
-          The automation has now fired four times on unvalidated state, \
-          with zero re-validation in between. The pattern is definitive."),
-        ("State Lookup",
-         "orchestrator.last_validated=9000s, elapsed=900s, trigger_count → 3",
-         "900 > 300. 3 consecutive triggers on expired state. \
-          No StateValidated has arrived. No evidence that any prior remediation \
-          resolved the underlying issue. The automation is in a feedback loop, \
-          amplifying an unresolved deviation with each successive trigger."),
+         "AutomationTriggered — orchestrator @ t=11400s",
+         "Third consecutive trigger on unvalidated state. \
+          8400 seconds since the last StateValidated. \
+          Three automated responses to an environment never re-confirmed. \
+          POC Domain 4: 'AI reacting to manipulated telemetry.' \
+          The amplification pattern is definitively established."),
+        ("POC Invariant",
+         "Domain 4 — Amplification cascade: 3 triggers, 28× validation gap",
+         "trigger_count → 3. Validation gap: 8400s — 28 times the required window. \
+          Every trigger operates on the same stale, unconfirmed state. \
+          In production: if the underlying deviation was attacker-injected, \
+          each 'Mother' action could be amplifying the attack rather than resolving it. \
+          The causal engine halts on the first unvalidated trigger; the system never did."),
         ("Invariant Result",
-         "✘ Critical — automation amplification proven",
-         "Contract AUTO-2 confirmed: sustained automation triggering on unvalidated state. \
-          4 triggers, 1 validation — Mother is reacting to incoherent telemetry. \
-          In a real deployment: halt signal required, human escalation mandatory. \
-          Every detection is a deterministic causal proof — not a probability, \
-          not a heuristic, not a model score. A broken causal chain."),
+         "✘ Issue detected — automation amplification proven",
+         "Scenario D confirmed — 3 violations (1 Warning + 2 Critical). \
+          POC §6: 'Expected: Automation invariant violation.' ✔ \
+          All four POC §1 objectives demonstrated across Scenarios A–D: \
+          privilege-to-impact inconsistencies ✔ (Scenario B), \
+          unjustified workload-induced physical bias ✔ (Scenario C), \
+          automation on unverified state ✔ (Scenario D), \
+          stealth manipulations evading threshold tools ✔ (all three detection scenarios)."),
     ],
 ];
 
@@ -853,25 +907,25 @@ fn run_scenario() -> Vec<StepData> {
     let mut user_history: HashMap<String, Vec<(usize, u64, &'static str)>> = HashMap::new();
 
     let script: Vec<(&str, &str, u64, &'static str, DomainEvent)> = vec![
-        // ── ControlPlane domain — Scenario A (Legitimate Variation) ──────────
-        ("svc_alpha", "Scenario A — Legitimate Variation", 1000, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
-        ("svc_alpha", "Scenario A — Legitimate Variation", 1030, "svc_alpha", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
-        // ── ControlPlane domain — Scenario B (Privilege Misuse) ──────────────
-        ("rogue_svc", "Scenario B — Privilege Misuse",     1100, "rogue_svc", DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
-        ("svc_beta",  "Scenario B — Privilege Misuse",     1200, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
-        ("svc_beta",  "Scenario B — Privilege Misuse",     5000, "svc_beta",  DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
-        // ── Thermal domain — Scenario C (Silent Scheduler Bias) ──────────────
-        ("rack_a", "Scenario C — Silent Scheduler Bias", 6000, "rack_a", DomainEvent::Thermal(ThermalEvent::WorkloadScheduled)),
-        ("rack_a", "Scenario C — Silent Scheduler Bias", 6300, "rack_a", DomainEvent::Thermal(ThermalEvent::ThermalReading(52))),
-        ("rack_b", "Scenario C — Silent Scheduler Bias", 6600, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(56))),
-        ("rack_b", "Scenario C — Silent Scheduler Bias", 7200, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(61))),
-        ("rack_b", "Scenario C — Silent Scheduler Bias", 7800, "rack_b", DomainEvent::Thermal(ThermalEvent::ThermalReading(64))),
-        // ── Automation domain — Scenario D (Automation Amplification) ─────────
-        ("orchestrator", "Scenario D — Automation Amplification", 9000, "orchestrator", DomainEvent::Automation(AutomationEvent::StateValidated)),
-        ("orchestrator", "Scenario D — Automation Amplification", 9100, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
-        ("orchestrator", "Scenario D — Automation Amplification", 9400, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
-        ("orchestrator", "Scenario D — Automation Amplification", 9600, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
-        ("orchestrator", "Scenario D — Automation Amplification", 9900, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        // ── Scenario A — Legitimate Variation (multi-domain, 0 violations) ────
+        ("svc_alpha",    "Scenario A — Legitimate Variation",  1000,  "svc_alpha",    DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_alpha",    "Scenario A — Legitimate Variation",  1030,  "svc_alpha",    DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        ("rack_a",       "Scenario A — Legitimate Variation",  2000,  "rack_a",       DomainEvent::Thermal(ThermalEvent::WorkloadScheduled)),
+        ("rack_a",       "Scenario A — Legitimate Variation",  2300,  "rack_a",       DomainEvent::Thermal(ThermalEvent::ThermalReading(52))),
+        ("orchestrator", "Scenario A — Legitimate Variation",  3000,  "orchestrator", DomainEvent::Automation(AutomationEvent::StateValidated)),
+        ("orchestrator", "Scenario A — Legitimate Variation",  3100,  "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        // ── Scenario B — Privilege Misuse (ControlPlane, 2 Critical) ──────────
+        ("rogue_svc",    "Scenario B — Privilege Misuse",      4000,  "rogue_svc",    DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        ("svc_beta",     "Scenario B — Privilege Misuse",      4200,  "svc_beta",     DomainEvent::ControlPlane(ControlPlaneEvent::RoleAssigned)),
+        ("svc_beta",     "Scenario B — Privilege Misuse",      8000,  "svc_beta",     DomainEvent::ControlPlane(ControlPlaneEvent::AdminActionTaken)),
+        // ── Scenario C — Silent Scheduler Bias (Thermal, 1 Warning + 2 Critical)
+        ("rack_b",       "Scenario C — Silent Scheduler Bias", 9000,  "rack_b",       DomainEvent::Thermal(ThermalEvent::ThermalReading(56))),
+        ("rack_b",       "Scenario C — Silent Scheduler Bias", 9600,  "rack_b",       DomainEvent::Thermal(ThermalEvent::ThermalReading(61))),
+        ("rack_b",       "Scenario C — Silent Scheduler Bias", 10200, "rack_b",       DomainEvent::Thermal(ThermalEvent::ThermalReading(64))),
+        // ── Scenario D — Automation Amplification (Automation, 1 Warning + 2 Critical)
+        ("orchestrator", "Scenario D — Automation Amplification", 11000, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        ("orchestrator", "Scenario D — Automation Amplification", 11200, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
+        ("orchestrator", "Scenario D — Automation Amplification", 11400, "orchestrator", DomainEvent::Automation(AutomationEvent::AutomationTriggered)),
     ];
 
     for (group, label, ts, user, kind) in &script {
@@ -913,10 +967,10 @@ fn run_scenario() -> Vec<StepData> {
 /// Declared scenario inputs + expected outcomes, matched against the POC document.
 /// Each future domain phase will add its own SCENARIO_X_JS constant.
 const SCENARIOS_JS: &str = r#"[
-  {id:"A",name:"Legitimate Variation",label:"Scenario A \u2014 Legitimate Variation",domain:"ControlPlane",description:"Valid role assignment followed by admin action within 1-hour window. No invariants broken.",expected:0},
-  {id:"B",name:"Privilege Misuse",label:"Scenario B \u2014 Privilege Misuse",domain:"ControlPlane",description:"Stealth admin actions without valid role assignments. Two Critical violations expected.",expected:2},
-  {id:"C",name:"Silent Scheduler Bias",label:"Scenario C \u2014 Silent Scheduler Bias",domain:"Thermal",description:"Sustained rack thermal bias with no declared workload shift. Three violations expected: 1 Warning escalating to 2 Critical.",expected:3},
-  {id:"D",name:"Automation Amplification",label:"Scenario D \u2014 Automation Amplification",domain:"Automation",description:"Repeated automation triggers on unvalidated system state. Three violations expected: 1 Warning escalating to 2 Critical.",expected:3}
+  {id:"A",name:"Legitimate Variation",label:"Scenario A \u2014 Legitimate Variation",domain:"Multi-Domain",description:"Authorised workload surge \u00b7 Approved privilege elevation \u00b7 Declared scheduling shift. All three domains behave correctly. Expected: no invariant violations.",expected:0},
+  {id:"B",name:"Privilege Misuse",label:"Scenario B \u2014 Privilege Misuse",domain:"ControlPlane",description:"Credential-valid escalation \u00b7 Out-of-scope control-plane mutation. Expected: IAM invariant violation.",expected:2},
+  {id:"C",name:"Silent Scheduler Bias",label:"Scenario C \u2014 Silent Scheduler Bias",domain:"Thermal",description:"Sustained rack skew \u00b7 No declared workload shift. Expected: control-plane and equilibrium invariant violation.",expected:3},
+  {id:"D",name:"Automation Amplification",label:"Scenario D \u2014 Automation Amplification",domain:"Automation",description:"Automated response to incomplete state. Expected: automation invariant violation.",expected:3}
 ]"#;
 
 // ── Serialize to JS ───────────────────────────────────────────────────────────
@@ -1147,11 +1201,11 @@ button:disabled{opacity:.4;cursor:not-allowed}
   display:flex;flex-direction:column;padding:.25rem 1.25rem;font-size:.65rem;gap:.1rem}
 .sc-row{display:flex;align-items:center;gap:.6rem;padding:.1rem 0}
 .sc-id{color:var(--blue);font-weight:700;letter-spacing:.04em;text-transform:uppercase}
-.sc-name{color:var(--text)}
-.sc-domain{color:var(--muted);font-size:.6rem;text-transform:uppercase;letter-spacing:.08em}
-.sc-expected{color:var(--muted)}
-.sc-sep{color:var(--dim)}
-.sc-result{margin-left:auto;font-weight:700;font-size:.7rem;letter-spacing:.02em;transition:color .2s}
+.sc-name{color:var(--text);flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.sc-domain{color:var(--muted);font-size:.6rem;text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;min-width:8rem}
+.sc-expected{color:var(--muted);flex-shrink:0}
+.sc-sep{color:var(--dim);flex-shrink:0}
+.sc-result{font-weight:700;font-size:.7rem;letter-spacing:.02em;transition:color .2s;flex-shrink:0;min-width:9rem;text-align:right}
 .sc-result.pass{color:var(--green)}
 .sc-result.fail{color:var(--red)}
 .sc-result.pending{color:var(--muted);font-weight:400}
@@ -1202,7 +1256,7 @@ button:disabled{opacity:.4;cursor:not-allowed}
 /* Scenario jump — make rows clickable */
 .sc-row{cursor:pointer;border-radius:3px;transition:background .12s}
 .sc-row:hover{background:rgba(79,172,254,.07)}
-.sc-jump-hint{margin-left:auto;font-size:.57rem;color:var(--blue);opacity:0;transition:opacity .15s;flex-shrink:0;padding-right:.1rem}
+.sc-jump-hint{font-size:.57rem;color:var(--blue);opacity:0;transition:opacity .15s;flex-shrink:0;padding-right:.1rem}
 .sc-row:hover .sc-jump-hint{opacity:1}
 /* Completion scenario summary */
 .sc-summary-grid{display:flex;flex-direction:column;gap:.22rem;margin-top:.5rem}
@@ -1215,12 +1269,111 @@ button:disabled{opacity:.4;cursor:not-allowed}
 .sc-summary-result{font-weight:700;white-space:nowrap;flex-shrink:0}
 .sc-summary-result.pass{color:var(--green)}
 .sc-summary-result.fail{color:var(--red)}
+/* ── Story / Technical mode ─────────────────────────────────────────────── */
+body:not(.technical-mode) .technical-only{display:none!important}
+body.technical-mode .story-only{display:none!important}
+#mode-btn{font-size:.68rem;letter-spacing:.01em}
+/* Story center panel */
+.story-panel{display:flex;flex-direction:column;gap:.52rem}
+.story-tag{font-size:.57rem;text-transform:uppercase;letter-spacing:.1em;color:var(--blue);font-weight:700}
+.story-poc-domain{font-size:.56rem;color:var(--muted);font-style:italic;margin-top:.05rem;line-height:1.4}
+.story-event-box{background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:.4rem .55rem}
+.story-ev-name{font-size:.88rem;font-weight:700;color:var(--text);margin-bottom:.12rem}
+.story-ev-meta{font-size:.62rem;color:var(--muted)}.story-ev-meta span{color:var(--text);font-weight:600}
+.story-block{display:flex;flex-direction:column;gap:.18rem}
+.story-block-lbl{font-size:.56rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);font-weight:700}
+.story-block-body{font-size:.7rem;line-height:1.65;color:var(--nbody)}
+.story-verdict{border-radius:4px;padding:.45rem .6rem;border:1px solid}
+.story-verdict.pass{border-color:rgba(0,229,160,.4);background:rgba(0,229,160,.06)}
+.story-verdict.fail{border-color:rgba(255,51,85,.5);background:rgba(255,51,85,.1)}
+.story-verdict.warn{border-color:rgba(255,186,59,.4);background:rgba(255,186,59,.07)}
+.story-verdict.pending{border-color:rgba(79,172,254,.3);background:rgba(79,172,254,.06)}
+.story-verdict-title{font-size:.77rem;font-weight:700;margin-bottom:.18rem}
+.story-verdict.pass .story-verdict-title{color:var(--green)}
+.story-verdict.fail .story-verdict-title{color:var(--red)}
+.story-verdict.warn .story-verdict-title{color:var(--yellow)}
+.story-verdict.pending .story-verdict-title{color:var(--blue)}
+.story-verdict-body{font-size:.67rem;line-height:1.6;color:var(--nbody)}
 "#;
 
 // ── JS ────────────────────────────────────────────────────────────────────────
 
 const JS: &str = r#"
 const WINDOW_SECS = 300;
+
+// ── Story mode lookup tables ───────────────────────────────────────────────
+const PLAIN_EVENTS = {
+  LoginSuccess:        'Login successful',
+  AuthTokenIssued:     'Access token issued',
+  AuthTokenUsed:       'Access token used',
+  RoleAssigned:        'Role granted',
+  AdminActionTaken:    'Admin action taken',
+  WorkloadScheduled:   'Workload declared',
+  ThermalReading:      'Temperature reading',
+  StateValidated:      'System state verified',
+  AutomationTriggered: 'Automation action fired',
+};
+const PLAIN_FIELDS = {
+  last_login:        'Last login',
+  token_issued:      'Token issued',
+  token_used:        'Token used',
+  role_assigned_at:  'Role granted at',
+  admin_action:      'Admin action taken',
+  last_workload_at:  'Workload declared at',
+  last_temp:         'Temperature',
+  bias_count:        'Unexplained high readings',
+  last_validated_at: 'State last verified',
+  trigger_count:     'Triggers since last check',
+  last_trigger_at:   'Last action at',
+};
+const PLAIN_DOMAINS = { ControlPlane: 'Control Plane' };
+
+// Maps scenario domain to the exact POC document domain label (§3)
+const POC_DOMAINS = {
+  'ControlPlane': 'Domain\u00a01\u20132: Identity & Privileged Access / Cloud Control Plane Integrity',
+  'Thermal':      'Domain\u00a03: Workload\u2013Thermal Equilibrium (OT-Proxy)',
+  'Automation':   'Domain\u00a04: Automation Amplification Guard',
+  'Multi-Domain': 'Domains\u00a01\u20134: Cross-Domain Baseline Validation',
+};
+
+function storyCenter(step, phaseIdx){
+  const evName   = PLAIN_EVENTS[step.event] || (step.is_deferred ? 'End of stream check' : step.event);
+  const scenario = SCENARIOS.find(s => s.label === step.group_label);
+  const domName  = scenario ? (PLAIN_DOMAINS[scenario.domain] || scenario.domain) : '';
+  const scTag    = scenario ? `Scenario ${scenario.id} \u00b7 ${domName} Domain` : step.group_label;
+  const pocDom   = scenario ? (POC_DOMAINS[scenario.domain] || '') : '';
+  let h = `<div class="story-panel">
+    <div class="story-tag">${scTag}</div>
+    ${pocDom ? `<div class="story-poc-domain">POC \u00a7 ${pocDom}</div>` : ''}
+    <div class="story-event-box">
+      <div class="story-ev-name">${evName}</div>
+      <div class="story-ev-meta">Entity: <span>${step.user}</span></div>
+    </div>`;
+  if (step.phases[0])
+    h += `<div class="story-block">
+      <div class="story-block-lbl">What happened</div>
+      <div class="story-block-body">${step.phases[0].body}</div>
+    </div>`;
+  if (phaseIdx >= 1 && step.phases[1])
+    h += `<div class="story-block">
+      <div class="story-block-lbl">POC Invariant</div>
+      <div class="story-block-body">${step.phases[1].body}</div>
+    </div>`;
+  if (phaseIdx >= 2 && step.phases[2]){
+    const r = step.check.result;
+    const vCls   = r==='pass'?'pass':r==='pending'?'pending':r==='warn'?'warn':'fail';
+    const vTitle = r==='pass'   ? '\u2714 All clear'
+                 : r==='pending'? '\u23f3 Pending'
+                 : r==='warn'   ? '\u26a0\ufe0f Warning'
+                 : '\u2718 Issue detected';
+    h += `<div class="story-verdict ${vCls}">
+      <div class="story-verdict-title">${vTitle}</div>
+      <div class="story-verdict-body">${step.phases[2].body}</div>
+    </div>`;
+  }
+  h += `</div>`;
+  return h;
+}
 
 // Populate scenario bar from SCENARIOS metadata
 (function(){
@@ -1413,21 +1566,23 @@ function addEventCard(step){
   const ctxCount  = step.check.lookup.filter(([k]) => !['user','event'].includes(k)).length
                   + (step.event === 'LoginSuccess' ? 2 : 0) + 3; // base + ctx + result
 
+  const plainEvName = PLAIN_EVENTS[step.event] || (step.is_deferred ? 'End of stream check' : step.event);
   card.innerHTML =
     `<div class="ev-head">` +
       `<div class="ev-seq">#${step.seq}</div>` +
       `<div class="ev-body">` +
-        `<div class="ev-type">${step.is_deferred ? '[FINALIZE]' : step.event}</div>` +
+        `<div class="ev-type technical-only">${step.is_deferred ? '[FINALIZE]' : step.event}</div>` +
+        `<div class="ev-type story-only">${plainEvName}</div>` +
         `<div class="ev-meta">` +
           `<span class="ev-user">${step.user}</span>` +
           `<span class="ev-ts">t=${tsDisplay}</span>` +
         `</div>` +
       `</div>` +
     `</div>` +
-    `<div class="ev-payload">${payloadHtml}</div>` +
-    `<button class="ev-payload-toggle" onclick="togglePayload(this)">▶ { } payload · ${ctxCount} fields</button>` +
+    `<div class="ev-payload technical-only">${payloadHtml}</div>` +
+    `<button class="ev-payload-toggle technical-only" onclick="togglePayload(this)">▶ { } payload · ${ctxCount} fields</button>` +
     `<div class="payload-json">${renderPayloadJson(step)}</div>` +
-    `<button class="ev-hist-toggle" onclick="toggleHistory(this)">▶ ${step.user} · ${hist.length} event${hist.length!==1?'s':''}</button>` +
+    `<button class="ev-hist-toggle technical-only" onclick="toggleHistory(this)">▶ ${step.user} · ${hist.length} event${hist.length!==1?'s':''}</button>` +
     `<div class="ev-history">${histHtml}</div>`;
 
   stream.appendChild(card);
@@ -1436,21 +1591,23 @@ function addEventCard(step){
 }
 
 function showPhase1(step){
-  document.getElementById('check-panel').innerHTML = `
-    <div class="check-hdr">INVARIANT CHECK</div>
-    <div class="check-rule">${step.check.rule}</div>
-    <div class="check-evaluating"><div class="spinner"></div><span>Evaluating event...</span></div>`;
+  document.getElementById('check-panel').innerHTML =
+    `<div class="technical-only"><div class="check-hdr">INVARIANT CHECK</div>` +
+    `<div class="check-rule">${step.check.rule}</div>` +
+    `<div class="check-evaluating"><div class="spinner"></div><span>Evaluating event...</span></div></div>` +
+    `<div class="story-only">${storyCenter(step, 0)}</div>`;
 }
 
 function showPhase2(step){
   const rows = step.check.lookup.map(([k,v,s]) =>
     `<div class="lookup-row"><span class="lookup-k">${k}</span><span class="lookup-v ${s}">${v}</span></div>`
   ).join('');
-  document.getElementById('check-panel').innerHTML = `
-    <div class="check-hdr">INVARIANT CHECK</div>
-    <div class="check-rule">${step.check.rule}</div>
-    <div class="lookup-table">${rows}</div>
-    <div class="check-evaluating"><div class="spinner"></div><span>Evaluating result...</span></div>`;
+  document.getElementById('check-panel').innerHTML =
+    `<div class="technical-only"><div class="check-hdr">INVARIANT CHECK</div>` +
+    `<div class="check-rule">${step.check.rule}</div>` +
+    `<div class="lookup-table">${rows}</div>` +
+    `<div class="check-evaluating"><div class="spinner"></div><span>Evaluating result...</span></div></div>` +
+    `<div class="story-only">${storyCenter(step, 1)}</div>`;
 }
 
 function showPhase3(step){
@@ -1460,14 +1617,13 @@ function showPhase3(step){
     `<div class="lookup-row"><span class="lookup-k">${k}</span><span class="lookup-v ${s}">${v}</span></div>`
   ).join('');
   const panel = document.getElementById('check-panel');
-  panel.innerHTML = `
-    <div class="check-hdr">INVARIANT CHECK</div>
-    <div class="check-rule">${step.check.rule}</div>
-    <div class="lookup-table">${rows}</div>
-    <div class="check-result ${cls}">
-      <div class="result-text">${step.check.result_text}</div>
-      <div class="result-detail">${step.check.result_detail}</div>
-    </div>`;
+  panel.innerHTML =
+    `<div class="technical-only"><div class="check-hdr">INVARIANT CHECK</div>` +
+    `<div class="check-rule">${step.check.rule}</div>` +
+    `<div class="lookup-table">${rows}</div>` +
+    `<div class="check-result ${cls}"><div class="result-text">${step.check.result_text}</div>` +
+    `<div class="result-detail">${step.check.result_detail}</div></div></div>` +
+    `<div class="story-only">${storyCenter(step, 2)}</div>`;
   if (r === 'fail'){
     panel.classList.remove('panel-violated');
     void panel.offsetWidth;
@@ -1495,7 +1651,7 @@ function addViolCard(step, v){
       <span class="vbadge ${v.severity}">${v.severity}</span>
       <span class="vwho">${step.user} · t=${step.is_deferred?'end':step.ts+'s'}</span>
     </div>
-    <div class="vrule">${v.rule}</div>
+    <div class="vrule technical-only">${v.rule}</div>
     <div class="vdetail">${v.detail}</div>`;
   log.appendChild(card);
   requestAnimationFrame(() => card.classList.add('visible'));
@@ -1508,12 +1664,18 @@ function updateState(step){
   panel.innerHTML = entities.map(u => {
     const s = step.state[u];
     const rows = s.fields.map(([k,v,cls]) =>
-      `<div class="state-row"><span class="state-k">${k}</span><span class="state-v ${cls}">${v}</span></div>`
+      `<div class="state-row">` +
+      `<span class="state-k technical-only">${k}</span>` +
+      `<span class="state-k story-only">${PLAIN_FIELDS[k]||k}</span>` +
+      `<span class="state-v ${cls}">${v}</span></div>`
     ).join('');
-    return `<div class="state-card">
-      <div class="state-user">${u}<span class="state-domain-lbl">[${s.domain}]</span></div>
-      ${rows}
-    </div>`;
+    const domStory = PLAIN_DOMAINS[s.domain] || s.domain;
+    return `<div class="state-card">` +
+      `<div class="state-user">${u}` +
+      `<span class="state-domain-lbl technical-only">[${s.domain}]</span>` +
+      `<span class="state-domain-lbl story-only">[${domStory}]</span></div>` +
+      rows +
+      `</div>`;
   }).join('');
 }
 
@@ -1599,6 +1761,10 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   resetAll();
 });
 document.getElementById('print-btn').addEventListener('click', printReport);
+document.getElementById('mode-btn').addEventListener('click', () => {
+  const isTechnical = document.body.classList.toggle('technical-mode');
+  document.getElementById('mode-btn').textContent = isTechnical ? '\ud83d\udcd6 Story' : '\ud83d\udd2c Technical';
+});
 
 function printReport(){
   const now   = new Date().toLocaleString();
@@ -1648,7 +1814,7 @@ tr:nth-child(even) td{background:#f8fafc}
 <h1>Authentication Chain Integrity Engine</h1>
 <div class="sub">Cross-Domain Causal Validation Report \u2014 MediaStream.ai Netsapien\u2122 PILOT POC</div>
 <div class="meta">Generated: ${now} &nbsp;\u00b7&nbsp; Environment: Isolated digital twin, software-only, stateless
-&nbsp;\u00b7&nbsp; Engine: Deterministic invariant enforcement \u00b7 No ML \u00b7 No pattern recognition</div>
+&nbsp;\u00b7&nbsp; Engine: Deterministic invariant enforcement</div>
 <h2>Run Summary</h2>
 <div class="stats">
   <div><div class="stat-val">${activeSteps.length}</div><div class="stat-lbl">Events</div></div>
@@ -1708,12 +1874,7 @@ r#"<!DOCTYPE html>
 <header>
   <div class="hdr-left">
     <h1>Authentication Chain Integrity Engine</h1>
-    <p>Deterministic invariant enforcement · no ML · no pattern recognition</p>
-  </div>
-  <div class="hdr-contract">
-    RoleAssigned <span class="arrow">→</span>
-    AdminActionTaken
-    <span style="color:var(--dim);margin-left:.4rem">· 1-hour window</span>
+    <p>Deterministic invariant enforcement</p>
   </div>
   <div class="hdr-controls">
     <button id="play-btn">▶ Play</button>
@@ -1721,6 +1882,7 @@ r#"<!DOCTYPE html>
     <button id="reset-btn">↺ Reset</button>
     <button id="speed-btn" title="Playback speed">1×</button>
     <button id="print-btn" title="Export findings report">⎙ Report</button>
+    <button id="mode-btn" title="Switch view mode">🔬 Technical</button>
     <button id="help-btn" title="About this demo">?</button>
   </div>
 </header>
@@ -1728,52 +1890,73 @@ r#"<!DOCTYPE html>
 <div id="modal-overlay">
   <div id="modal">
     <div id="modal-head">
-      <span id="modal-title">Auth Chain Integrity Engine — Overview</span>
+      <span id="modal-title">Cross-Domain Causal Validation — POC Demo</span>
       <button id="modal-close" title="Close">✕</button>
     </div>
     <div id="modal-body">
       <div class="modal-section">
-        <div class="modal-h">What It Is</div>
-        <p>A deterministic causal validation engine that enforces <strong style="color:var(--blue)">integrity across four domains</strong> of a sovereign AI platform — no ML, no probabilistic models, pure logical invariants. When something goes wrong, the engine doesn't guess; it traces the causal chain backwards and proves exactly where it broke.</p>
+        <div class="modal-h">What This Proves</div>
+        <p>This POC answers one question: <strong style="color:var(--text)">can a deterministic causal engine detect integrity violations across multiple domains of a sovereign AI platform — with zero false positives and zero model dependency?</strong></p>
+        <p style="margin-top:.5rem">The engine watches events arriving in real time and enforces declared rules about what must happen before something else is allowed to happen. When a rule breaks, it doesn't guess — it produces a proof: the exact entity, the exact event, the exact rule that failed, and by how much.</p>
       </div>
+
       <div class="modal-section">
-        <div class="modal-h">What Each Domain Enforces</div>
+        <div class="modal-h">The Four Scenarios</div>
+        <p style="color:var(--muted);font-size:.65rem;margin-bottom:.45rem">Directly from the POC specification. Scenarios B, C, and D inject violations. Scenario A must produce zero — false positives are a failure.</p>
         <table class="modal-table">
           <tr>
-            <td>ControlPlane</td>
-            <td><div class="modal-chain" style="margin:.15rem 0">RoleAssigned <span class="arrow">→</span> AdminActionTaken <span class="window">· 1-hour window</span></div>
-            Detects <strong style="color:var(--text)">privilege misuse</strong> — admin actions taken without a valid, current role assignment.</td>
+            <td style="white-space:nowrap"><strong style="color:var(--green)">A</strong> · Legitimate Variation</td>
+            <td>
+              <div style="color:var(--muted);font-size:.63rem;margin-bottom:.2rem">Approved privilege elevation · Authorised workload surge · Declared scheduling shift</div>
+              Three domains each perform a fully authorised operation. The engine must pass all of them and produce <strong style="color:var(--green)">zero violations</strong>.
+            </td>
+            <td style="white-space:nowrap"><span class="modal-pass">✔ 0 violations</span></td>
           </tr>
           <tr>
-            <td>Thermal</td>
-            <td><div class="modal-chain" style="margin:.15rem 0">WorkloadScheduled <span class="arrow">→</span> ThermalReading <span class="window">· 30-min window</span></div>
-            Detects <strong style="color:var(--text)">silent scheduler bias</strong> — sustained heat load on a rack with no declared workload to explain it.</td>
+            <td style="white-space:nowrap"><strong style="color:var(--red)">B</strong> · Privilege Misuse</td>
+            <td>
+              <div style="color:var(--muted);font-size:.63rem;margin-bottom:.2rem">Credential-valid escalation · Out-of-scope control-plane mutation</div>
+              A service acts with no role on record. A second acts after its role expired. Both have valid credentials — but credentials are not authorisation.
+            </td>
+            <td style="white-space:nowrap"><span class="modal-fail">✘ 2 Critical</span></td>
           </tr>
           <tr>
-            <td>Automation</td>
-            <td><div class="modal-chain" style="margin:.15rem 0">StateValidated <span class="arrow">→</span> AutomationTriggered <span class="window">· 5-min window</span></div>
-            Detects <strong style="color:var(--text)">automation amplification</strong> — repeated AI-triggered remediations on system state that has not been re-validated, potentially amplifying an attacker's manipulation rather than correcting it.</td>
+            <td style="white-space:nowrap"><strong style="color:var(--red)">C</strong> · Silent Scheduler Bias</td>
+            <td>
+              <div style="color:var(--muted);font-size:.63rem;margin-bottom:.2rem">Sustained rack skew · No declared workload shift</div>
+              A rack runs progressively hotter (56°C → 61°C → 64°C) with no workload declaration to explain it. The scheduler is silently biasing load without declaring intent.
+            </td>
+            <td style="white-space:nowrap"><span class="modal-warn">⚠ 1 Warning</span><br><span class="modal-fail">✘ 2 Critical</span></td>
+          </tr>
+          <tr>
+            <td style="white-space:nowrap"><strong style="color:var(--red)">D</strong> · Automation Amplification</td>
+            <td>
+              <div style="color:var(--muted);font-size:.63rem;margin-bottom:.2rem">Automated response to incomplete state</div>
+              An orchestrator fires three automated remediations on system state that was last validated over 2 hours ago. It cannot know whether its actions are helping or making things worse.
+            </td>
+            <td style="white-space:nowrap"><span class="modal-warn">⚠ 1 Warning</span><br><span class="modal-fail">✘ 2 Critical</span></td>
           </tr>
         </table>
       </div>
+
       <div class="modal-section">
-        <div class="modal-h">What the Demo Shows</div>
+        <div class="modal-h">What You're Watching</div>
         <table class="modal-table">
-          <tr><td>Scenario A · ControlPlane</td><td>svc_alpha: role assigned, admin action within 1-hour window</td><td><span class="modal-pass">✔ PASS — 0 variances</span></td></tr>
-          <tr><td>Scenario B · ControlPlane</td><td>rogue_svc: admin action with no role on record</td><td><span class="modal-fail">✘ Critical — no role assignment</span></td></tr>
-          <tr><td>Scenario B · ControlPlane</td><td>svc_beta: admin action 200 s past role expiry</td><td><span class="modal-fail">✘ Critical — stale role</span></td></tr>
-          <tr><td>Scenario C · Thermal</td><td>rack_a: workload declared, high temp reading justified</td><td><span class="modal-pass">✔ PASS — bias justified</span></td></tr>
-          <tr><td>Scenario C · Thermal</td><td>rack_b: rising temps (56 → 61 → 64°C), no workload declared</td><td><span class="modal-warn">⚠ Warning</span> + <span class="modal-fail">✘ Critical ×2</span></td></tr>
-          <tr><td>Scenario D · Automation</td><td>orchestrator: 3 triggers after 5-min validation window expires</td><td><span class="modal-warn">⚠ Warning</span> + <span class="modal-fail">✘ Critical ×2</span></td></tr>
+          <tr><td style="white-space:nowrap">Events panel</td><td>The raw event stream as it arrives — each card shows who, what, and when.</td></tr>
+          <tr><td style="white-space:nowrap">Center panel</td><td>The causal check in progress — what rule is being tested, what the engine found, and the verdict.</td></tr>
+          <tr><td style="white-space:nowrap">Status panel</td><td>Live state of every tracked entity after each event — role assignments, temperatures, validation timestamps.</td></tr>
+          <tr><td style="white-space:nowrap">Violation log</td><td>Every detected violation, in order — severity, entity, rule, and the exact proof.</td></tr>
         </table>
-        <p style="color:var(--nbody);margin-top:.5rem">Every violation is a <strong style="color:var(--text)">deterministic proof</strong>, not a risk score — e.g. <em>"validation expired 100 s ago, trigger_count=2: automation is amplifying an unresolved deviation."</em></p>
       </div>
+
       <div class="modal-section">
-        <div class="modal-h">How to Use the Demo</div>
-        <ul style="margin:.2rem 0 0 1.2rem;color:var(--nbody);font-size:.68rem;line-height:1.9">
-          <li><strong style="color:var(--green)">▶ Play</strong> — steps through all 15 events automatically across all 4 domains</li>
-          <li><strong style="color:var(--blue)">⏸ Step Through</strong> — advance one phase at a time with narrator guidance explaining each causal check</li>
-          <li><strong style="color:var(--text)">↺ Reset</strong> — clear all state and restart from the beginning</li>
+        <div class="modal-h">How to Use</div>
+        <ul style="margin:.2rem 0 0 1.2rem;color:var(--nbody);font-size:.68rem;line-height:2">
+          <li><strong style="color:var(--green)">▶ Play</strong> — runs all 15 events across all 4 scenarios automatically</li>
+          <li><strong style="color:var(--blue)">⏸ Step Through</strong> — pauses at each phase with a plain-language explanation of every check</li>
+          <li><strong style="color:var(--text)">Click any scenario</strong> in the bar at the bottom to jump directly to that scenario</li>
+          <li><strong style="color:var(--text)">🔬 Technical</strong> — toggle to reveal the full invariant check tables and contract rules</li>
+          <li><strong style="color:var(--text)">⎙ Report</strong> — generates a printable summary after a run completes</li>
         </ul>
       </div>
     </div>
@@ -1782,17 +1965,17 @@ r#"<!DOCTYPE html>
 
 <div class="main-grid">
   <div class="panel">
-    <div class="panel-title">Event Stream</div>
+    <div class="panel-title"><span class="technical-only">Event Stream</span><span class="story-only">Events</span></div>
     <div class="panel-content" id="event-stream"></div>
   </div>
   <div class="panel">
-    <div class="panel-title">Contract Evaluation</div>
+    <div class="panel-title"><span class="technical-only">Contract Evaluation</span><span class="story-only">What's Happening</span></div>
     <div class="panel-content" id="check-panel">
       <div class="check-idle">Press ▶ Play or ⏸ Step Through to begin</div>
     </div>
   </div>
   <div class="panel">
-    <div class="panel-title">Engine State</div>
+    <div class="panel-title"><span class="technical-only">Engine State</span><span class="story-only">System Status</span></div>
     <div class="panel-content" id="state-panel">
       <div class="state-idle">State will appear as events are processed</div>
     </div>
@@ -1817,8 +2000,8 @@ r#"<!DOCTYPE html>
 
 <div class="violations-section">
   <div class="viol-header">
-    <span class="viol-title">Variance Log</span>
-    <span class="viol-count-wrap">violations: <span class="viol-count" id="viol-count">0</span></span>
+    <span class="viol-title"><span class="technical-only">Variance Log</span><span class="story-only">Issues Found</span></span>
+    <span class="viol-count-wrap"><span class="technical-only">violations: </span><span class="story-only">issues: </span><span class="viol-count" id="viol-count">0</span></span>
   </div>
   <div class="viol-cards" id="viol-cards"></div>
 </div>
