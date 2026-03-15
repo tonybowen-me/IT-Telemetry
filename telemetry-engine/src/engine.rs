@@ -21,7 +21,7 @@ impl Engine {
             },
             _ => vec![], // other domains handled by their own engines
         }
-    }
+    } 
 
     fn on_login(&mut self, ev: &Event) -> Vec<Variance> {
         self.state.entry(ev.entity.to_owned()).or_default().logins.push(ev.ts);

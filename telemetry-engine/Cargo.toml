@@ -6,3 +6,11 @@ description = "Deterministic IT contract enforcement engine — zero ML, pure in
 
 # Zero external dependencies — stdlib only
 [dependencies]
+
+[[bin]]
+name = "telemetry-engine"
+path = "src/main.rs"
+
+[[bin]]
+name = "configure"
+path = "src-configurable/main.rs"

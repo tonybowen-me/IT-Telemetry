@@ -1,0 +1,1081 @@
+mod events;
+mod state;
+mod engine;
+
+use events::{ZtnaEntry, ZtnaEvent};
+use engine::ZtnaEngine;
+use std::fmt::Write as FmtWrite;
+
+fn js_str(s: &str) -> String {
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+         .replace('"',  "\\\"")
+         .replace('\n', " ")
+         .replace('\r', "")
+    )
+}
+
+fn stream_to_js(stream: &[ZtnaEntry]) -> String {
+    let mut out = String::from("[\n");
+    for e in stream {
+        let mut row = String::new();
+        write!(
+            row,
+            "  {{ts:{},session:{},actor:{},event:{},detail:{},css:{}}},\n",
+            e.ts,
+            js_str(e.session),
+            js_str(e.actor),
+            js_str(e.event.name()),
+            js_str(e.detail),
+            js_str(e.event.css_class()),
+        ).unwrap();
+        out.push_str(&row);
+    }
+    out.push(']');
+    out
+}
+
+fn generate_html(stream_js: &str) -> String {
+    format!(
+        r###"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Session Security Monitor — Cold Privilege Escalation Demo</title>
+<style>{css}</style>
+</head>
+<body>
+
+<header>
+  <div class="hdr-left">
+    <h1>Session Security Monitor</h1>
+    <p>Does this activity make sense?</p>
+  </div>
+  <div class="hdr-center">
+    <div class="story-chain">
+      <div class="chain-step ev-hb">
+        <span class="cs-icon">&#x2665;</span>
+        <span class="cs-label">Active<br>Connection</span>
+      </div>
+      <span class="chain-arrow">&#x2192;</span>
+      <div class="chain-step ev-id">
+        <span class="cs-icon">&#x2713;</span>
+        <span class="cs-label">Signed<br>In</span>
+      </div>
+      <span class="chain-arrow">&#x2192;</span>
+      <div class="chain-step ev-res">
+        <span class="cs-icon">&#x25A1;</span>
+        <span class="cs-label">Used<br>System</span>
+      </div>
+      <span class="chain-arrow">&#x2192;</span>
+      <div class="chain-step ev-priv">
+        <span class="cs-icon">&#x2605;</span>
+        <span class="cs-label">Admin<br>Action</span>
+      </div>
+    </div>
+    <div class="chain-caption">Every legitimate admin action follows this path &mdash; in order</div>
+  </div>
+  <div class="hdr-right">
+    <span class="pulse-wrap"><span class="pulse-dot" id="pulse-dot"></span><span id="live-label">LIVE</span></span>
+    <button id="pause-btn" onclick="togglePause()">&#x23F8; Pause</button>
+    <button id="report-btn" onclick="printReport()">&#x238E; Report</button>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- ── COL 1: WHAT'S HAPPENING ───────────────────── -->
+  <section class="col col-stream">
+    <div class="col-hdr">
+      <div>
+        <div class="col-title">What&rsquo;s happening right now</div>
+        <div class="col-sub">Alice&rsquo;s active work session &mdash; sess_a1b2</div>
+      </div>
+      <span class="live-badge" id="tick-badge">&#x25CF; Live</span>
+    </div>
+    <div class="feed-wrap">
+      <div id="feed"></div>
+    </div>
+  </section>
+
+  <!-- ── COL 2: SIMULATE AN ATTACK ─────────────────── -->
+  <section class="col col-inject">
+    <div class="col-hdr">
+      <div>
+        <div class="col-title">Simulate an attack</div>
+        <div class="col-sub">Configure what the attacker did first</div>
+      </div>
+    </div>
+
+    <div class="inject-body">
+
+      <div class="actor-card">
+        <div class="actor-label">Attacker</div>
+        <div class="actor-name">Eve</div>
+        <div class="actor-email">eve@external.com</div>
+        <div class="actor-action">Attempting to export all records</div>
+      </div>
+
+      <div class="prereq-section">
+        <div class="prereq-header">What did Eve do before trying to export?</div>
+        <div class="prereq-hint">Uncheck a box to remove that step from her history &mdash; the system will flag whatever&rsquo;s missing.</div>
+
+        <label class="prereq-row" id="row-hb">
+          <input type="checkbox" id="prereq-hb" checked onchange="updatePreview()">
+          <div class="prereq-story">
+            <strong>Had an active connection</strong>
+            <small>Her session was confirmed live just moments before</small>
+          </div>
+          <span class="check-num">&#x2460;</span>
+        </label>
+
+        <label class="prereq-row" id="row-id">
+          <input type="checkbox" id="prereq-id" checked onchange="updatePreview()">
+          <div class="prereq-story">
+            <strong>Signed in recently</strong>
+            <small>She verified her identity within the last 5 minutes</small>
+          </div>
+          <span class="check-num">&#x2461;</span>
+        </label>
+
+        <div class="prereq-row prereq-key" id="row-res">
+          <div class="prereq-story">
+            <strong>Used the system normally first</strong>
+            <small>Automatically detected from the live stream &mdash; fires true once &ldquo;File opened&rdquo; appears this cycle</small>
+          </div>
+          <span id="cycle-res-indicator" class="cycle-res-badge badge-no">&#x2718; No file opened yet &mdash; PRIV&#x2011;3 will trigger</span>
+        </div>
+      </div>
+
+      <!-- Live preview -->
+      <div class="preview-section">
+        <div class="preview-q">If you let this through &mdash; what happens?</div>
+        <div id="preview-checks"></div>
+        <div class="preview-verdict" id="preview-verdict"></div>
+      </div>
+
+      <button class="fire-btn" id="fire-btn" onclick="firePayload()">
+        &#x26A1;&nbsp; Run simulation
+      </button>
+
+      <div class="inject-note">Each simulation creates a new session so it never contaminates Alice&rsquo;s live stream.</div>
+    </div>
+  </section>
+
+  <!-- ── COL 3: HOW WE DECIDE ───────────────────────── -->
+  <section class="col col-state">
+    <div class="col-hdr">
+      <div class="col-title">Who&rsquo;s in the system</div>
+    </div>
+    <div id="state-panel"></div>
+
+    <div class="col-hdr mt-section">
+      <div>
+        <div class="col-title">What we check</div>
+        <div class="col-sub">Before allowing any admin action</div>
+      </div>
+    </div>
+    <div class="invariant-list">
+      <div class="inv-card" id="inv-priv1">
+        <div class="inv-num">Check &#x2460;</div>
+        <div class="inv-q">Is the connection still alive?</div>
+        <div class="inv-explain">A session keepalive must have been seen in the last 30 seconds. This confirms the connection is live &mdash; not a replayed or stolen token.</div>
+        <div class="inv-rule-small">PRIV-1 &middot; SessionHeartbeat &le; 30s</div>
+        <div class="inv-status" id="inv-priv1-status"></div>
+      </div>
+      <div class="inv-card" id="inv-priv2">
+        <div class="inv-num">Check &#x2461;</div>
+        <div class="inv-q">Did they sign in recently?</div>
+        <div class="inv-explain">The user&rsquo;s identity must have been confirmed by your login system within the last 5 minutes. Old logins don&rsquo;t count.</div>
+        <div class="inv-rule-small">PRIV-2 &middot; IdentityVerified &le; 5 min</div>
+        <div class="inv-status" id="inv-priv2-status"></div>
+      </div>
+      <div class="inv-card inv-key" id="inv-priv3">
+        <div class="inv-num">Check &#x2462;</div>
+        <div class="inv-q">Did they use the system first?</div>
+        <div class="inv-explain">The actor must have opened at least one file or resource before taking an admin action. Skipping this step &mdash; going straight to the vault &mdash; is the tell-tale sign of cold privilege escalation.</div>
+        <div class="inv-rule-small">PRIV-3 &middot; Prior ResourceAccessed required</div>
+        <div class="inv-status" id="inv-priv3-status"></div>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /main-grid -->
+
+<!-- ── FINDING BAR ──────────────────────────────────── -->
+<div id="finding-bar" class="finding-bar hidden">
+  <div class="fb-inner">
+    <div class="fb-left">
+      <div class="fb-icon" id="fb-icon">&#x26A0;</div>
+      <div class="fb-text">
+        <div class="fb-headline" id="fb-headline"></div>
+        <div class="fb-story"   id="fb-story"></div>
+      </div>
+    </div>
+    <div class="fb-right">
+      <div id="fb-checks"></div>
+      <div class="fb-technical" id="fb-technical"></div>
+    </div>
+    <button class="fb-close" onclick="closeFinding()">&#x2715;</button>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+// DATA
+// ═══════════════════════════════════════════════════
+const STREAM = {stream_js};
+const HEARTBEAT_WINDOW = 30;
+const IDENTITY_WINDOW  = 300;
+
+// ═══════════════════════════════════════════════════
+// HUMAN-READABLE LABELS
+// ═══════════════════════════════════════════════════
+const EVENT_LABEL = {{
+  SessionHeartbeat:      'Session still active',
+  IdentityVerified:      'Identity confirmed',
+  ResourceAccessed:      'File opened',
+  PrivilegedActionTaken: 'Admin action taken',
+}};
+
+const EVENT_DESC = {{
+  SessionHeartbeat:      'Connection keepalive \u2014 ZTNA proxy confirms session is live',
+  IdentityVerified:      'MFA re-verification \u00b7 identity confirmed by identity provider',
+  ResourceAccessed:      detail => `Accessed ${{detail}}`,
+  PrivilegedActionTaken: detail => `Action: ${{detail}}`,
+}};
+
+const CHECK_STORY = {{
+  'PRIV-1': {{
+    headline: 'No active connection',
+    story: "This actor\u2019s session wasn\u2019t confirmed live when they tried to take an admin action. Legitimate users always have an active, pulsing connection. This could mean the session was replayed or hijacked.",
+    short: 'Session not confirmed live',
+  }},
+  'PRIV-2': {{
+    headline: 'Never signed in recently',
+    story: "This actor hadn\u2019t verified their identity within the required window. Legitimate users always re-confirm who they are before taking sensitive actions.",
+    short: 'Identity window expired',
+  }},
+  'PRIV-3': {{
+    headline: 'Went straight to admin \u2014 skipped normal usage',
+    story: "This actor jumped directly to the most sensitive action available without ever opening a single file first. Real users always browse or access resources before escalating to admin actions. Going straight to the vault is the signature of a cold privilege escalation attack.",
+    short: 'No prior resource access in this session',
+  }},
+}};
+
+// ═══════════════════════════════════════════════════
+// RUNTIME STATE
+// ═══════════════════════════════════════════════════
+let simTs             = 0;
+let tickIdx           = 0;
+let injCount          = 0;
+let paused            = false;
+let timer;
+let sessions          = {{}};
+let cycleResAccessed  = false;  // true once ResourceAccessed fires in the current cycle
+
+// Logs for report
+let feedLog      = []; // all events displayed
+let violationLog = []; // all violations with context
+
+// ═══════════════════════════════════════════════════
+// SESSION ENGINE  (mirrors Rust exactly)
+// ═══════════════════════════════════════════════════
+function getSession(id) {{
+  if (!sessions[id]) sessions[id] = {{
+    last_heartbeat_at: null, last_identity_at: null,
+    last_resource_at: null,  privileged_count: 0,
+    last_heartbeat_wall: null, last_identity_wall: null, last_resource_wall: null,
+  }};
+  return sessions[id];
+}}
+function hbFresh(s) {{ return s.last_heartbeat_wall !== null && (Date.now() - s.last_heartbeat_wall) / 1000 <= HEARTBEAT_WINDOW; }}
+function idFresh(s) {{ return s.last_identity_wall  !== null && (Date.now() - s.last_identity_wall)  / 1000 <= IDENTITY_WINDOW; }}
+function hasRes(s)  {{ return s.last_resource_wall  !== null; }}
+function hbAge(s)   {{ return s.last_heartbeat_wall !== null ? ((Date.now() - s.last_heartbeat_wall) / 1000).toFixed(0) : null; }}
+function idAge(s)   {{ return s.last_identity_wall  !== null ? ((Date.now() - s.last_identity_wall)  / 1000).toFixed(0) : null; }}
+
+function checkPrivileged(sessionId) {{
+  const s   = getSession(sessionId);
+  const vs  = [];
+  const hba = hbAge(s);
+  const ida = idAge(s);
+  if (!hbFresh(s)) vs.push({{
+    rule: 'PRIV-1',
+    detail: s.last_heartbeat_wall === null
+      ? `No session heartbeat on record for '${{sessionId}}'`
+      : `Last heartbeat ${{hba}}s ago (window: ${{HEARTBEAT_WINDOW}}s)`,
+    ...(CHECK_STORY['PRIV-1']),
+  }});
+  if (!idFresh(s)) vs.push({{
+    rule: 'PRIV-2',
+    detail: s.last_identity_wall === null
+      ? `No identity verification on record for '${{sessionId}}'`
+      : `Last verified ${{ida}}s ago (window: ${{IDENTITY_WINDOW}}s)`,
+    ...(CHECK_STORY['PRIV-2']),
+  }});
+  if (!hasRes(s)) vs.push({{
+    rule: 'PRIV-3',
+    detail: `No ResourceAccessed on record for '${{sessionId}}' \u2014 actor escalated without establishing session context`,
+    ...(CHECK_STORY['PRIV-3']),
+  }});
+  return vs;
+}}
+
+function ingest(entry, ts) {{
+  const s   = getSession(entry.session);
+  const now = Date.now();
+  switch (entry.event) {{
+    case 'SessionHeartbeat':
+      s.last_heartbeat_at = ts; s.last_heartbeat_wall = now; return [];
+    case 'IdentityVerified':
+      s.last_identity_at  = ts; s.last_identity_wall  = now; return [];
+    case 'ResourceAccessed':
+      s.last_resource_at  = ts; s.last_resource_wall  = now;
+      cycleResAccessed = true;
+      updateCycleResIndicator();
+      return [];
+    case 'PrivilegedActionTaken':
+      const vs = checkPrivileged(entry.session);
+      s.privileged_count++;
+      return vs;
+  }}
+  return [];
+}}
+
+// ═══════════════════════════════════════════════════
+// CYCLE DIVIDER
+// ═══════════════════════════════════════════════════
+function addCycleDivider(n) {{
+  cycleResAccessed = false;
+  updateCycleResIndicator();
+
+  const feed = document.getElementById('feed');
+  const div  = document.createElement('div');
+  div.className = 'cycle-header';
+  div.innerHTML = `<span>Cycle ${{n}}</span>`;
+  feed.appendChild(div);
+  feed.scrollTop = feed.scrollHeight;
+}}
+
+function updateCycleResIndicator() {{
+  const el = document.getElementById('cycle-res-indicator');
+  if (!el) return;
+  if (cycleResAccessed) {{
+    el.className = 'cycle-res-badge badge-yes';
+    el.textContent = '\u2714 File opened this cycle \u2014 PRIV\u20113 will pass';
+  }} else {{
+    el.className = 'cycle-res-badge badge-no';
+    el.textContent = '\u2718 No file opened yet \u2014 PRIV\u20113 will trigger';
+  }}
+  updatePreview();
+}}
+
+// ═══════════════════════════════════════════════════
+// STREAM TICK
+// ═══════════════════════════════════════════════════
+function tick() {{
+  if (tickIdx % STREAM.length === 0) {{
+    addCycleDivider(Math.floor(tickIdx / STREAM.length) + 1);
+  }}
+  const entry = STREAM[tickIdx % STREAM.length];
+  simTs += 3;
+  const vs = ingest(entry, simTs);
+  addFeedEntry(entry, simTs, vs, false);
+  updateStatePanel();
+  updateChecksPanel('sess_a1b2');
+  updateTickBadge();
+  tickIdx++;
+}}
+
+function togglePause() {{
+  paused = !paused;
+  const btn = document.getElementById('pause-btn');
+  const dot = document.getElementById('pulse-dot');
+  const lbl = document.getElementById('live-label');
+  if (paused) {{
+    clearInterval(timer);
+    btn.innerHTML = '\u25B6 Resume';
+    btn.classList.add('btn-resume');
+    dot.classList.remove('pulse-active');
+    lbl.textContent = 'PAUSED';
+  }} else {{
+    timer = setInterval(tick, 3000);
+    btn.innerHTML = '\u23F8 Pause';
+    btn.classList.remove('btn-resume');
+    dot.classList.add('pulse-active');
+    lbl.textContent = 'LIVE';
+  }}
+}}
+
+// ═══════════════════════════════════════════════════
+// INJECT
+// ═══════════════════════════════════════════════════
+function firePayload() {{
+  injCount++;
+  const sessionId = `atk_${{String(injCount).padStart(3,'0')}}`;
+  const prereqHb  = document.getElementById('prereq-hb').checked;
+  const prereqId  = document.getElementById('prereq-id').checked;
+  // PRIV-3 uses the live cycle state — not a checkbox —
+  // so the engine reflects what has actually happened in the stream.
+  const prereqRes = cycleResAccessed;
+
+  simTs += 1;
+  const ts = simTs;
+
+  const s   = getSession(sessionId);
+  const now = Date.now();
+  if (prereqHb)  {{ s.last_heartbeat_at = ts - 5;  s.last_heartbeat_wall = now - 5000;  }}
+  if (prereqId)  {{ s.last_identity_at  = ts - 10; s.last_identity_wall  = now - 10000; }}
+  if (prereqRes) {{ s.last_resource_at  = ts - 3;  s.last_resource_wall  = now - 3000;  }}
+
+  const entry = {{
+    ts, session: sessionId, actor: 'eve@external.com',
+    event: 'PrivilegedActionTaken',
+    detail: 'export_all_records \u00b7 scope=*', css: 'ev-priv',
+  }};
+
+  const vs = checkPrivileged(sessionId);
+  s.privileged_count++;
+
+  // Log for report
+  const logEntry = {{
+    ts, sessionId, actor: 'Eve', prereqs: {{hb: prereqHb, id: prereqId, res: prereqRes}},
+    violations: vs, passed: vs.length === 0,
+  }};
+  violationLog.push(logEntry);
+
+  addFeedEntry(entry, ts, vs, true);
+  updateStatePanel();
+  updateTickBadge();
+
+  if (vs.length > 0) {{
+    showFinding(vs, false);
+    const btn = document.getElementById('fire-btn');
+    btn.classList.add('fire-hit');
+    setTimeout(() => btn.classList.remove('fire-hit'), 600);
+  }} else {{
+    showFinding([], true);
+  }}
+}}
+
+// ═══════════════════════════════════════════════════
+// LIVE PREVIEW
+// ═══════════════════════════════════════════════════
+function updatePreview() {{
+  const hb  = document.getElementById('prereq-hb').checked;
+  const id  = document.getElementById('prereq-id').checked;
+  const res = cycleResAccessed;  // driven by the live stream, not a checkbox
+
+  const checks = [
+    {{ label: 'Had an active connection',  pass: hb  }},
+    {{ label: 'Signed in recently',         pass: id  }},
+    {{ label: 'Used the system first',      pass: res }},
+  ];
+
+  const allPass   = checks.every(c => c.pass);
+  const failCount = checks.filter(c => !c.pass).length;
+
+  document.getElementById('preview-checks').innerHTML = checks.map((c,i) => `
+    <div class="prev-check ${{c.pass ? 'pcheck-ok' : 'pcheck-no'}}">
+      <span class="pc-icon">${{c.pass ? '\u2714' : '\u2718'}}</span>
+      <span class="pc-num">${{i+1}}</span>
+      <span class="pc-label">${{c.label}}</span>
+    </div>`).join('');
+
+  const verd = document.getElementById('preview-verdict');
+  if (allPass) {{
+    verd.className = 'preview-verdict verd-ok';
+    verd.innerHTML = '\u2714&nbsp; Would pass &mdash; all three checks satisfied';
+  }} else {{
+    verd.className = 'preview-verdict verd-warn';
+    verd.innerHTML = `\u26A0;&nbsp; Would be flagged &mdash; ${{failCount}} check${{failCount>1?'s':''}} failed`;
+  }}
+
+  document.getElementById('row-hb').classList.toggle('prereq-missing', !hb);
+  document.getElementById('row-id').classList.toggle('prereq-missing', !id);
+  document.getElementById('row-res').classList.toggle('prereq-missing', !res);
+}}
+
+// ═══════════════════════════════════════════════════
+// RENDER: FEED
+// ═══════════════════════════════════════════════════
+function descForEntry(entry) {{
+  const fn_ = EVENT_DESC[entry.event];
+  return typeof fn_ === 'function' ? fn_(entry.detail) : (fn_ || entry.detail);
+}}
+
+function addFeedEntry(entry, ts, variances, injected) {{
+  feedLog.push({{ts, session: entry.session, actor: entry.actor, event: entry.event,
+    detail: entry.detail, injected, violations: variances}});
+
+  const feed = document.getElementById('feed');
+  const row  = document.createElement('div');
+  row.className = `feed-row ${{injected ? 'feed-injected' : ''}} ${{variances.length > 0 ? 'feed-violated' : ''}}`;
+  row.setAttribute('data-new','1');
+
+  const label  = EVENT_LABEL[entry.event] || entry.event;
+  const desc   = descForEntry(entry);
+  const tsStr  = `${{String(ts).padStart(4)}}s`;
+  const isPriv = entry.event === 'PrivilegedActionTaken';
+
+  let mainHtml = `
+    <div class="feed-main">
+      <span class="feed-ts">${{tsStr}}</span>
+      <span class="ev-dot ${{entry.css}}"></span>
+      <div class="feed-text">
+        <div class="feed-label ${{isPriv ? 'feed-label-priv' : ''}}">${{label}}${{injected ? ' <span class="inj-tag">SIMULATED</span>' : ''}}</div>
+        <div class="feed-desc">${{desc}}</div>
+      </div>
+      ${{isPriv && !injected && variances.length === 0 ? '<span class="feed-ok-badge">\u2714 Normal</span>' : ''}}
+    </div>`;
+
+  let violHtml = '';
+  if (variances.length > 0) {{
+    const primary = variances[0];
+    violHtml = `
+      <div class="feed-finding">
+        <span class="ff-icon">\u26A0;</span>
+        <div class="ff-text">
+          <strong>${{primary.headline}}</strong>
+          <span>${{primary.short}}</span>
+        </div>
+        ${{variances.length > 1 ? `<span class="ff-more">+${{variances.length-1}} more</span>` : ''}}
+      </div>`;
+  }}
+
+  row.innerHTML = mainHtml + violHtml;
+  feed.appendChild(row);
+  feed.scrollTop = feed.scrollHeight;
+  requestAnimationFrame(() => requestAnimationFrame(() => row.removeAttribute('data-new')));
+  while (feed.children.length > 80) feed.removeChild(feed.firstChild);
+}}
+
+// ═══════════════════════════════════════════════════
+// RENDER: STATE PANEL
+// ═══════════════════════════════════════════════════
+function updateStatePanel() {{
+  const panel = document.getElementById('state-panel');
+  const ids   = Object.keys(sessions).sort();
+  if (ids.length === 0) {{ panel.innerHTML = '<div class="state-empty">Awaiting events\u2026</div>'; return; }}
+
+  panel.innerHTML = ids.map(id => {{
+    const s     = sessions[id];
+    const isAtk  = id.startsWith('atk_');
+    const hbSecs = s.last_heartbeat_wall !== null ? (Date.now() - s.last_heartbeat_wall) / 1000 : null;
+    const idSecs = s.last_identity_wall  !== null ? (Date.now() - s.last_identity_wall)  / 1000 : null;
+    const resAt  = s.last_resource_wall;
+    const hbOk   = hbSecs !== null && hbSecs <= HEARTBEAT_WINDOW;
+    const idOk   = idSecs !== null && idSecs <= IDENTITY_WINDOW;
+
+    function row(icon, label, ok, val, missing) {{
+      const cls = val === null ? 'sf-none' : ok ? 'sf-ok' : 'sf-fail';
+      const txt = val === null ? (missing || '\u2014 not yet') : ok ? val : `${{val}} \u26A0`;
+      return `<div class="sf-row">
+        <span class="sf-icon">${{icon}}</span>
+        <span class="sf-label">${{label}}</span>
+        <span class="sf-val ${{cls}}">${{txt}}</span>
+      </div>`;
+    }}
+
+    return `<div class="session-card ${{isAtk ? 'session-atk' : 'session-norm'}}">
+      <div class="sc-top">
+        <div>
+          <div class="sc-name">${{isAtk ? 'Eve (simulated attack)' : 'Alice (live session)'}}</div>
+          <div class="sc-id">${{id}}</div>
+        </div>
+        <span class="sc-badge ${{isAtk ? 'sc-badge-atk' : 'sc-badge-ok'}}">${{isAtk ? 'SIMULATED' : 'NORMAL'}}</span>
+      </div>
+      ${{row('\u2665', 'Connection active',  hbOk, hbSecs !== null ? `${{hbSecs.toFixed(0)}}s ago` : null, 'no heartbeat seen')}}
+      ${{row('\u2713', 'Signed in',          idOk, idSecs !== null ? `${{idSecs.toFixed(0)}}s ago` : null, 'not signed in')}}
+      ${{row('\u25A1', 'Used system',        !!resAt, resAt !== null ? 'yes' : null, 'no files opened')}}
+      ${{row('\u2605', 'Admin actions',      true,  String(s.privileged_count), null)}}
+    </div>`;
+  }}).join('');
+}}
+
+// ═══════════════════════════════════════════════════
+// RENDER: CHECKS PANEL (invariant status for a session)
+// ═══════════════════════════════════════════════════
+function updateChecksPanel(sessionId) {{
+  const s = sessions[sessionId];
+
+  function setCard(elId, statusId, pass, msg) {{
+    const el  = document.getElementById(elId);
+    const sts = document.getElementById(statusId);
+    el.className  = `inv-card${{elId === 'inv-priv3' ? ' inv-key' : ''}} ${{pass === null ? '' : pass ? 'inv-pass' : 'inv-fail'}}`;
+    sts.innerHTML = pass === null ? '' : pass
+      ? `<span class="inv-ok">\u2714 ${{msg}}</span>`
+      : `<span class="inv-no">\u2718 ${{msg}}</span>`;
+  }}
+
+  if (!s) {{
+    setCard('inv-priv1','inv-priv1-status',null,'');
+    setCard('inv-priv2','inv-priv2-status',null,'');
+    setCard('inv-priv3','inv-priv3-status',null,'');
+    return;
+  }}
+
+  const hbOk   = hbFresh(s);
+  const idOk   = idFresh(s);
+  const resOk  = hasRes(s);
+  const hbSecs = s.last_heartbeat_wall !== null ? ((Date.now() - s.last_heartbeat_wall) / 1000).toFixed(0) : null;
+  const idSecs = s.last_identity_wall  !== null ? ((Date.now() - s.last_identity_wall)  / 1000).toFixed(0) : null;
+  const hbStr  = hbSecs !== null ? `${{hbSecs}}s ago` : 'never';
+  const idStr  = idSecs !== null ? `${{idSecs}}s ago` : 'never';
+
+  setCard('inv-priv1','inv-priv1-status', hbOk,  hbOk  ? `Heartbeat ${{hbStr}}` : `Expired \u2014 last seen ${{hbStr}}`);
+  setCard('inv-priv2','inv-priv2-status', idOk,  idOk  ? `Signed in ${{idStr}}` : `Expired \u2014 last login ${{idStr}}`);
+  setCard('inv-priv3','inv-priv3-status', resOk, resOk ? `Files accessed` : `No files opened yet`);
+}}
+
+// ═══════════════════════════════════════════════════
+// RENDER: FINDING BAR
+// ═══════════════════════════════════════════════════
+function showFinding(vs, passed) {{
+  const bar      = document.getElementById('finding-bar');
+  const headline = document.getElementById('fb-headline');
+  const story    = document.getElementById('fb-story');
+  const icon     = document.getElementById('fb-icon');
+  const checks   = document.getElementById('fb-checks');
+  const tech     = document.getElementById('fb-technical');
+
+  if (passed) {{
+    bar.className  = 'finding-bar finding-pass';
+    icon.textContent = '\u2714';
+    headline.textContent = 'Behavior looks normal';
+    story.textContent = 'Eve had an active connection, had signed in recently, and had already opened files in this session. All three checks passed \u2014 the admin action is causally justified. This is what legitimate admin behavior looks like.';
+    checks.innerHTML = '';
+    tech.innerHTML = '<span class="tech-tag">PRIV-1 \u2714</span><span class="tech-tag">PRIV-2 \u2714</span><span class="tech-tag">PRIV-3 \u2714</span>';
+  }} else {{
+    bar.className  = 'finding-bar finding-alert';
+    icon.textContent = '\u26A0';
+    const primary = vs[0];
+    headline.textContent = primary.headline;
+    story.textContent    = primary.story;
+    checks.innerHTML = vs.map(v =>
+      `<span class="tech-tag tech-fail">${{v.rule}} \u2718 ${{v.short}}</span>`).join('');
+    tech.innerHTML = `<span class="tech-label">Technical:</span> ${{vs.map(v=>v.detail).join(' \u00b7 ')}}`;
+  }}
+  bar.classList.remove('hidden');
+}}
+
+function closeFinding() {{
+  document.getElementById('finding-bar').classList.add('hidden');
+}}
+
+// ═══════════════════════════════════════════════════
+// RENDER: MISC
+// ═══════════════════════════════════════════════════
+function updateTickBadge() {{
+  document.getElementById('tick-badge').innerHTML = '\u25CF Live';
+}}
+
+// ═══════════════════════════════════════════════════
+// REPORT
+// ═══════════════════════════════════════════════════
+function printReport() {{
+  const now       = new Date().toLocaleString();
+  const attacks   = violationLog.filter(e => !e.passed);
+  const cleanRuns = violationLog.filter(e => e.passed);
+  const totalEvs  = feedLog.length;
+  const aliceEvs  = feedLog.filter(e => e.session === 'sess_a1b2');
+  const alicePriv = aliceEvs.filter(e => e.event === 'PrivilegedActionTaken');
+
+  // Timeline of Alice's session for report
+  const aliceTimeline = aliceEvs.slice(0, 10).map(e => {{
+    const label = EVENT_LABEL[e.event] || e.event;
+    const desc  = e.event === 'ResourceAccessed' ? e.detail
+                : e.event === 'PrivilegedActionTaken' ? e.detail
+                : (EVENT_DESC[e.event] || '');
+    return `<tr><td>t=${{e.ts}}s</td><td>${{label}}</td><td style="color:#475569">${{typeof desc==='function'?desc(e.detail):desc}}</td><td class="pass">\u2714</td></tr>`;
+  }}).join('');
+
+  // Attack findings
+  const attackRows = attacks.map((a,i) => {{
+    const checks = [
+      a.prereqs.hb  ? '\u2714 Active connection' : '\u2718 No active connection',
+      a.prereqs.id  ? '\u2714 Signed in recently' : '\u2718 Not signed in recently',
+      a.prereqs.res ? '\u2714 Used system first'  : '\u2718 Never used system first',
+    ].join(' &nbsp;\u00b7&nbsp; ');
+    const findings = a.violations.map(v =>
+      `<div style="margin-top:6px;padding:6px 8px;background:#fef2f2;border-left:3px solid #dc2626;border-radius:2px">
+        <strong style="color:#dc2626">${{v.headline}}</strong><br>
+        <span style="color:#475569">${{v.story}}</span>
+      </div>`).join('');
+    return `<div style="margin-bottom:14px;padding:10px 12px;border:1px solid #fecaca;border-radius:4px;background:#fff">
+      <div style="font-weight:700;margin-bottom:4px">Simulation ${{i+1}} &mdash; t=${{a.ts}}s &mdash; Eve (${{a.sessionId}})</div>
+      <div style="font-size:11px;color:#64748b;margin-bottom:6px">Before the attempt: ${{checks}}</div>
+      ${{findings}}
+    </div>`;
+  }}).join('') || '<p style="color:#64748b">No attack simulations run yet.</p>';
+
+  const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<title>Session Security Report</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:'Segoe UI',Arial,sans-serif;font-size:12px;color:#1e293b;background:#fff;padding:2cm;line-height:1.6}}
+h1{{font-size:20px;font-weight:700;color:#0f172a;margin-bottom:2px}}
+.sub{{color:#64748b;font-size:12px;margin-bottom:4px}}
+.meta{{font-size:10px;color:#94a3b8;padding-bottom:10px;margin-bottom:16px;border-bottom:1px solid #f1f5f9}}
+h2{{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;
+  color:#334155;border-bottom:2px solid #e2e8f0;padding-bottom:4px;margin:20px 0 10px}}
+.stat-row{{display:flex;gap:28px;margin:10px 0 6px}}
+.stat{{text-align:center}}
+.stat-n{{font-size:28px;font-weight:700;line-height:1}}
+.stat-l{{font-size:9px;text-transform:uppercase;color:#94a3b8;letter-spacing:.05em}}
+.ok{{color:#16a34a}}.flag{{color:#dc2626}}.warn{{color:#d97706}}
+table{{width:100%;border-collapse:collapse;font-size:11px;margin-top:4px}}
+th{{background:#f8fafc;padding:5px 8px;text-align:left;border:1px solid #e2e8f0;
+  font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#64748b}}
+td{{padding:5px 8px;border:1px solid #e2e8f0;vertical-align:top}}
+tr:nth-child(even) td{{background:#f8fafc}}
+.pass{{color:#16a34a;font-weight:700}}.fail{{color:#dc2626;font-weight:700}}
+.how-it-works{{margin-top:20px;padding:12px 14px;background:#f0f9ff;
+  border-left:3px solid #3b82f6;border-radius:2px;font-size:11px;color:#1e40af;line-height:1.65}}
+.how-it-works strong{{display:block;margin-bottom:4px;font-size:12px}}
+@media print{{body{{padding:1.5cm}}}}
+</style></head><body>
+<h1>Session Security Report</h1>
+<div class="sub">Cold Privilege Escalation Detection &mdash; ZTNA Causal Engine</div>
+<div class="meta">Generated: ${{now}} &nbsp;&middot;&nbsp; Engine: Deterministic causal invariant enforcement &nbsp;&middot;&nbsp; Zero ML, zero thresholds</div>
+
+<h2>What we saw</h2>
+<div class="stat-row">
+  <div class="stat"><div class="stat-n">${{totalEvs}}</div><div class="stat-l">Events observed</div></div>
+  <div class="stat"><div class="stat-n ok">${{alicePriv.length}}</div><div class="stat-l">Legitimate admin actions</div></div>
+  <div class="stat"><div class="stat-n flag">${{attacks.length}}</div><div class="stat-l">Suspicious behaviors</div></div>
+  <div class="stat"><div class="stat-n warn">${{cleanRuns.length}}</div><div class="stat-l">Simulations that passed</div></div>
+</div>
+
+<h2>What normal looks like &mdash; Alice&rsquo;s session</h2>
+<p style="font-size:11px;color:#475569;margin-bottom:8px">
+  Alice followed the expected pattern every single time. Her session was active, her identity was confirmed,
+  and she accessed files before taking any admin actions. Every one of her privileged actions passed all three checks.
+</p>
+<table>
+  <thead><tr><th>Time</th><th>What happened</th><th>Detail</th><th>Status</th></tr></thead>
+  <tbody>${{aliceTimeline}}</tbody>
+</table>
+
+<h2>Suspicious behavior${{attacks.length !== 1 ? 's' : ''}} detected &mdash; ${{attacks.length}} finding${{attacks.length !== 1 ? 's' : ''}}</h2>
+${{attackRows}}
+
+${{cleanRuns.length > 0 ? `<h2>Simulations that passed (${{cleanRuns.length}})</h2>
+<p style="font-size:11px;color:#475569">
+  ${{cleanRuns.length}} simulation${{cleanRuns.length!==1?'s were':' was'}} run with all prerequisites present.
+  The system correctly allowed those actions &mdash; demonstrating that this engine does not block everything,
+  only the behaviors that break the causal chain.
+</p>` : ''}}
+
+<div class="how-it-works">
+  <strong>How this detection works</strong>
+  This system does not use passwords, firewall rules, IP reputation, or machine learning.
+  It asks one question: <em>&ldquo;Does this behavior follow the exact sequence that real users always follow?&rdquo;</em>
+  Every legitimate admin action is preceded by an active connection, a recent login, and normal resource usage.
+  When any of those steps are missing, the system flags it &mdash; regardless of whether the credentials are valid.
+  This catches attackers who have stolen valid passwords but cannot replicate the behavioral history of a real user.
+</div>
+</body></html>`;
+
+  const w = window.open('', '_blank');
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  w.print();
+}}
+
+// ═══════════════════════════════════════════════════
+// BOOT
+// ═══════════════════════════════════════════════════
+updatePreview();
+updateStatePanel();
+tick();
+timer = setInterval(tick, 3000);
+setInterval(() => {{ updateChecksPanel('sess_a1b2'); updateStatePanel(); }}, 1000);
+document.getElementById('pulse-dot').classList.add('pulse-active');
+</script>
+</body>
+</html>"###,
+        css       = CSS,
+        stream_js = stream_js,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CSS
+// ─────────────────────────────────────────────────────────────────────────────
+const CSS: &str = r##"
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#050b14;--surface:#091222;--panel:#0a1628;--border:#163354;
+  --green:#00e5a0;--red:#ff3355;--yellow:#ffba3b;--blue:#4facfe;
+  --orange:#ff8c42;--teal:#00d4ff;
+  --text:#c9d8e8;--muted:#4a6585;--dim:#1a2e4a;--faint:#0c1a2e;
+  --hb:#4facfe;--id:#00e5a0;--res:#00d4ff;--priv:#ffba3b;
+}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);
+  font-family:'Segoe UI','Calibri','Helvetica Neue',Arial,sans-serif;
+  display:flex;flex-direction:column;font-size:13px;line-height:1.5}
+
+/* ── HEADER ─────────────────────────────────────── */
+header{flex-shrink:0;background:var(--surface);border-bottom:1px solid var(--border);
+  padding:.6rem 1.2rem;display:flex;align-items:center;gap:1rem;height:72px}
+.hdr-left{flex-shrink:0}
+.hdr-left h1{font-size:1rem;font-weight:700;color:#e2eaf4;letter-spacing:.01em}
+.hdr-left p{font-size:.67rem;color:var(--muted);margin-top:.1rem}
+.hdr-center{flex:1;display:flex;flex-direction:column;align-items:center;gap:.18rem}
+.story-chain{display:flex;align-items:center;gap:.5rem}
+.chain-step{display:flex;align-items:center;gap:.35rem;padding:.25rem .6rem;
+  border-radius:5px;border:1px solid transparent}
+.cs-icon{font-size:.85rem}
+.cs-label{font-size:.55rem;font-weight:600;line-height:1.2;text-align:center;letter-spacing:.02em}
+.chain-step.ev-hb {background:rgba(79,172,254,.12);border-color:rgba(79,172,254,.2);color:var(--hb)}
+.chain-step.ev-id {background:rgba(0,229,160,.1);border-color:rgba(0,229,160,.18);color:var(--id)}
+.chain-step.ev-res{background:rgba(0,212,255,.1);border-color:rgba(0,212,255,.18);color:var(--res)}
+.chain-step.ev-priv{background:rgba(255,186,59,.1);border-color:rgba(255,186,59,.18);color:var(--priv)}
+.chain-arrow{color:var(--muted);font-size:1rem}
+.chain-caption{font-size:.58rem;color:var(--muted);letter-spacing:.03em}
+.hdr-right{flex-shrink:0;display:flex;align-items:center;gap:.5rem}
+.pulse-wrap{display:flex;align-items:center;gap:.3rem;font-size:.62rem;
+  font-weight:700;letter-spacing:.07em;color:var(--muted)}
+.pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.pulse-dot.pulse-active{background:var(--green);box-shadow:0 0 6px var(--green);
+  animation:pulse 1.8s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.45;transform:scale(.8)}}
+#live-label{font-size:.62rem;font-weight:700}
+button{background:var(--panel);border:1px solid var(--border);color:var(--text);
+  padding:.3rem .8rem;border-radius:5px;cursor:pointer;font-family:inherit;font-size:.7rem;
+  transition:all .15s}
+button:hover{border-color:var(--blue);color:var(--blue)}
+.btn-resume{border-color:var(--green)!important;color:var(--green)!important}
+#report-btn{border-color:var(--muted)}
+#report-btn:hover{border-color:var(--text);color:var(--text)}
+
+/* ── GRID ────────────────────────────────────────── */
+.main-grid{flex:1;display:grid;grid-template-columns:1.9fr 1.05fr 1.05fr;
+  gap:0;overflow:hidden;min-height:0}
+.col{display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden}
+.col:last-child{border-right:none}
+.col-hdr{flex-shrink:0;padding:.5rem .95rem;background:var(--surface);
+  border-bottom:1px solid var(--border);display:flex;align-items:center;
+  justify-content:space-between}
+.col-title{font-size:.7rem;font-weight:700;color:#8baed4;letter-spacing:.04em}
+.col-sub{font-size:.6rem;color:var(--muted);margin-top:.1rem}
+.live-badge{font-size:.58rem;font-weight:700;color:var(--green);
+  background:rgba(0,229,160,.1);border:1px solid rgba(0,229,160,.2);
+  padding:.15rem .4rem;border-radius:3px;letter-spacing:.05em}
+.mt-section{border-top:1px solid var(--border)}
+
+/* ── EVENT DOTS ─────────────────────────────────── */
+.ev-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:1px}
+.ev-hb  .ev-dot,.ev-dot.ev-hb  {background:var(--hb)}
+.ev-id  .ev-dot,.ev-dot.ev-id  {background:var(--id)}
+.ev-res .ev-dot,.ev-dot.ev-res {background:var(--res)}
+.ev-priv.ev-dot,.ev-dot.ev-priv{background:var(--priv)}
+
+/* ── FEED ────────────────────────────────────────── */
+.cycle-header{display:flex;align-items:center;gap:.5rem;font-size:.62rem;font-weight:700;
+  color:var(--dim);text-transform:uppercase;letter-spacing:.1em;
+  margin:.6rem .55rem .25rem;}
+.cycle-header::before,.cycle-header::after{content:'';flex:1;height:1px;background:#1e293b;}
+.feed-wrap{flex:1;overflow-y:auto;padding:.4rem .5rem}
+.feed-wrap::-webkit-scrollbar{width:4px}
+.feed-wrap::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px}
+.feed-row{padding:.4rem .55rem;margin-bottom:.3rem;border-radius:5px;
+  background:var(--faint);border-left:3px solid transparent;
+  transition:opacity .3s,transform .3s}
+.feed-row[data-new]{opacity:0;transform:translateY(-8px)}
+.feed-injected{background:rgba(255,140,66,.04)!important;border-left-color:var(--orange)!important}
+.feed-violated{background:rgba(255,51,85,.06)!important;border-left-color:var(--red)!important}
+.feed-main{display:flex;align-items:flex-start;gap:.55rem}
+.feed-ts{font-size:.62rem;color:var(--muted);flex-shrink:0;width:38px;
+  font-variant-numeric:tabular-nums;padding-top:1px}
+.feed-text{flex:1;min-width:0}
+.feed-label{font-size:.72rem;font-weight:600;color:var(--text);line-height:1.3}
+.feed-label-priv{color:var(--priv)}
+.feed-desc{font-size:.62rem;color:var(--muted);margin-top:.1rem;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.feed-ok-badge{font-size:.55rem;padding:.1rem .35rem;border-radius:3px;flex-shrink:0;
+  background:rgba(0,229,160,.1);color:var(--green);border:1px solid rgba(0,229,160,.2);
+  font-weight:600;align-self:center;white-space:nowrap}
+.inj-tag{font-size:.52rem;padding:.05rem .25rem;border-radius:2px;margin-left:.35rem;
+  background:rgba(255,140,66,.15);color:var(--orange);border:1px solid rgba(255,140,66,.3);
+  font-weight:700;vertical-align:middle}
+.feed-finding{margin-top:.35rem;padding:.3rem .5rem;border-radius:3px;
+  background:rgba(255,51,85,.07);border:1px solid rgba(255,51,85,.18);
+  display:flex;align-items:center;gap:.5rem}
+.ff-icon{font-size:.9rem;color:var(--red);flex-shrink:0}
+.ff-text{flex:1;font-size:.62rem}
+.ff-text strong{color:var(--red);display:block;font-size:.65rem}
+.ff-text span{color:var(--muted)}
+.ff-more{font-size:.55rem;color:var(--muted);flex-shrink:0}
+
+/* ── INJECT PANEL ────────────────────────────────── */
+.inject-body{flex:1;overflow-y:auto;padding:.75rem .95rem;display:flex;
+  flex-direction:column;gap:.7rem}
+.inject-body::-webkit-scrollbar{width:3px}
+.inject-body::-webkit-scrollbar-thumb{background:var(--dim)}
+
+.actor-card{background:var(--faint);border:1px solid var(--border);border-radius:6px;
+  padding:.6rem .75rem}
+.actor-label{font-size:.58rem;font-weight:700;letter-spacing:.08em;color:var(--muted);
+  text-transform:uppercase;margin-bottom:.3rem}
+.actor-name{font-size:.85rem;font-weight:700;color:var(--orange)}
+.actor-email{font-size:.62rem;color:var(--muted);margin-top:.08rem}
+.actor-action{font-size:.65rem;color:var(--text);margin-top:.3rem;
+  padding:.2rem .4rem;background:rgba(255,140,66,.08);border-radius:3px;
+  border-left:2px solid var(--orange)}
+
+.prereq-section{background:var(--faint);border:1px solid var(--border);border-radius:6px;
+  padding:.65rem .75rem;display:flex;flex-direction:column;gap:.3rem}
+.prereq-header{font-size:.72rem;font-weight:700;color:var(--text);margin-bottom:.15rem}
+.prereq-hint{font-size:.6rem;color:var(--muted);line-height:1.5;margin-bottom:.25rem}
+.prereq-row{display:flex;align-items:center;gap:.55rem;cursor:pointer;
+  padding:.35rem .45rem;border-radius:5px;border:1px solid transparent;
+  transition:background .15s;user-select:none}
+.prereq-row:hover{background:var(--dim)}
+.prereq-row input{accent-color:var(--blue);flex-shrink:0;cursor:pointer;width:14px;height:14px}
+.prereq-story{flex:1;display:flex;flex-direction:column;gap:.07rem}
+.prereq-story strong{font-size:.67rem;font-weight:600}
+.prereq-story small{font-size:.58rem;color:var(--muted)}
+.prereq-key{border-color:rgba(255,186,59,.18)!important;cursor:default!important}
+.prereq-key:hover{background:transparent!important}
+.prereq-key .prereq-story strong{color:var(--priv)}
+.cycle-res-badge{font-size:.6rem;font-weight:700;padding:.2rem .45rem;border-radius:4px;
+  flex-shrink:0;white-space:nowrap;letter-spacing:.02em;transition:background .3s,color .3s}
+.badge-yes{background:rgba(0,229,160,.12);color:var(--green);border:1px solid rgba(0,229,160,.25)}
+.badge-no{background:rgba(255,51,85,.1);color:var(--red);border:1px solid rgba(255,51,85,.2)}
+.check-num{font-size:.75rem;flex-shrink:0;color:var(--muted)}
+.warn-num{color:var(--priv)!important}
+.prereq-missing{background:rgba(255,51,85,.05)!important;border-color:rgba(255,51,85,.2)!important}
+
+.preview-section{background:var(--faint);border:1px solid var(--border);border-radius:6px;
+  padding:.65rem .75rem}
+.preview-q{font-size:.67rem;font-weight:700;color:var(--text);margin-bottom:.35rem}
+.prev-check{display:flex;align-items:center;gap:.4rem;padding:.18rem 0;font-size:.63rem}
+.pc-icon{flex-shrink:0;font-size:.7rem;width:14px}
+.pc-num{flex-shrink:0;width:14px;color:var(--muted);font-size:.58rem}
+.pcheck-ok .pc-icon{color:var(--green)}
+.pcheck-no .pc-icon{color:var(--red)}
+.pcheck-ok .pc-label{color:var(--text)}
+.pcheck-no .pc-label{color:var(--muted)}
+.pc-label{flex:1}
+.preview-verdict{font-size:.67rem;font-weight:700;margin-top:.45rem;padding:.35rem .5rem;
+  border-radius:4px;border:1px solid transparent}
+.verd-ok{background:rgba(0,229,160,.08);color:var(--green);border-color:rgba(0,229,160,.2)}
+.verd-warn{background:rgba(255,51,85,.07);color:var(--red);border-color:rgba(255,51,85,.18)}
+
+.fire-btn{width:100%;padding:.65rem;border-radius:5px;font-size:.75rem;font-weight:700;
+  cursor:pointer;border:1px solid var(--orange);color:var(--orange);
+  background:rgba(255,140,66,.08);font-family:inherit;transition:all .15s;flex-shrink:0}
+.fire-btn:hover{background:rgba(255,140,66,.18);box-shadow:0 0 14px rgba(255,140,66,.2)}
+.fire-hit{background:rgba(255,51,85,.18)!important;border-color:var(--red)!important;
+  color:var(--red)!important;animation:shake .3s ease}
+@keyframes shake{0%,100%{transform:translateX(0)}30%{transform:translateX(-5px)}70%{transform:translateX(5px)}}
+.inject-note{font-size:.58rem;color:var(--muted);text-align:center;line-height:1.5}
+
+/* ── STATE PANEL ─────────────────────────────────── */
+#state-panel{flex:0 1 auto;max-height:44%;overflow-y:auto;padding:.5rem .7rem;
+  display:flex;flex-direction:column;gap:.5rem}
+#state-panel::-webkit-scrollbar{width:3px}
+#state-panel::-webkit-scrollbar-thumb{background:var(--dim)}
+.session-card{background:var(--faint);border:1px solid var(--border);border-radius:5px;
+  padding:.55rem .7rem}
+.session-norm{border-left:3px solid rgba(0,229,160,.3)}
+.session-atk {border-left:3px solid rgba(255,140,66,.35)}
+.sc-top{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:.3rem}
+.sc-name{font-size:.68rem;font-weight:700;color:var(--text)}
+.sc-id{font-size:.57rem;color:var(--muted);margin-top:.05rem;font-family:'Cascadia Code',monospace}
+.sc-badge{font-size:.52rem;padding:.1rem .3rem;border-radius:3px;font-weight:700;
+  letter-spacing:.04em;flex-shrink:0}
+.sc-badge-ok {background:rgba(0,229,160,.1);color:var(--green);border:1px solid rgba(0,229,160,.2)}
+.sc-badge-atk{background:rgba(255,140,66,.12);color:var(--orange);border:1px solid rgba(255,140,66,.25)}
+.sf-row{display:flex;align-items:center;gap:.4rem;padding:.12rem 0}
+.sf-icon{font-size:.75rem;width:16px;flex-shrink:0;text-align:center}
+.sf-label{font-size:.62rem;color:var(--muted);flex:1}
+.sf-val{font-size:.63rem;font-weight:600}
+.sf-ok{color:var(--green)}.sf-fail{color:var(--red)}.sf-none{color:var(--muted)}
+.state-empty{font-size:.65rem;color:var(--muted);padding:.6rem}
+
+/* ── CHECKS PANEL ────────────────────────────────── */
+.invariant-list{flex:1;overflow-y:auto;padding:.5rem .7rem;display:flex;flex-direction:column;gap:.45rem}
+.invariant-list::-webkit-scrollbar{width:3px}
+.invariant-list::-webkit-scrollbar-thumb{background:var(--dim)}
+.inv-card{background:var(--faint);border:1px solid var(--border);border-radius:5px;
+  padding:.55rem .7rem;transition:border-color .25s,background .25s}
+.inv-pass{border-color:rgba(0,229,160,.3)!important;background:rgba(0,229,160,.04)!important}
+.inv-fail{border-color:rgba(255,51,85,.28)!important;background:rgba(255,51,85,.04)!important}
+.inv-num{font-size:.58rem;font-weight:700;color:var(--blue);margin-bottom:.1rem}
+.inv-q{font-size:.7rem;font-weight:700;margin-bottom:.18rem}
+.inv-explain{font-size:.6rem;color:var(--muted);line-height:1.55;margin-bottom:.25rem}
+.inv-rule-small{font-size:.55rem;color:var(--dim);color:#2a4060;margin-bottom:.25rem;font-family:'Cascadia Code',monospace}
+.inv-key .inv-q{color:var(--priv)}
+.inv-status{font-size:.62rem;font-weight:600;min-height:1.1em}
+.inv-ok{color:var(--green)}.inv-no{color:var(--red)}
+
+/* ── FINDING BAR ─────────────────────────────────── */
+.finding-bar{flex-shrink:0;border-top:1px solid var(--border);padding:.6rem 1rem}
+.finding-bar.hidden{display:none}
+.finding-pass {background:rgba(0,229,160,.05);border-top-color:rgba(0,229,160,.3)}
+.finding-alert{background:rgba(255,51,85,.06);border-top-color:rgba(255,51,85,.35)}
+.fb-inner{display:flex;align-items:flex-start;gap:.9rem;position:relative}
+.fb-icon{font-size:1.5rem;flex-shrink:0;line-height:1}
+.finding-pass  .fb-icon{color:var(--green)}
+.finding-alert .fb-icon{color:var(--red)}
+.fb-text{flex:1;min-width:0}
+.fb-headline{font-size:.8rem;font-weight:700;margin-bottom:.2rem}
+.finding-pass  .fb-headline{color:var(--green)}
+.finding-alert .fb-headline{color:var(--red)}
+.fb-story{font-size:.67rem;color:var(--muted);line-height:1.6;max-width:520px}
+.fb-right{flex-shrink:0;display:flex;flex-direction:column;gap:.35rem;max-width:300px}
+.tech-tag{display:inline-block;font-size:.57rem;padding:.1rem .3rem;border-radius:3px;
+  background:var(--dim);color:var(--muted);margin:.1rem .1rem 0 0;font-family:'Cascadia Code',monospace}
+.tech-fail{background:rgba(255,51,85,.12)!important;color:var(--red)!important}
+.tech-label{font-size:.57rem;color:var(--muted)}
+.fb-technical{font-size:.58rem;color:var(--muted);line-height:1.55;font-family:'Cascadia Code',monospace}
+.fb-close{position:absolute;top:0;right:0;background:none;border:none;color:var(--muted);
+  cursor:pointer;font-size:.8rem;padding:.2rem .4rem}
+.fb-close:hover{color:var(--text);border:none}
+"##;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENTRY POINT
+// ─────────────────────────────────────────────────────────────────────────────
+fn main() {
+    // One clean cycle — repeats in the browser to tell the same story over and over.
+    let stream = vec![
+        ZtnaEntry { ts: 0, session: "sess_a1b2", actor: "alice@corp.com",
+            event: ZtnaEvent::SessionHeartbeat,      detail: "keepalive \u{00b7} connection active" },
+        ZtnaEntry { ts: 3, session: "sess_a1b2", actor: "alice@corp.com",
+            event: ZtnaEvent::IdentityVerified,      detail: "MFA pass \u{00b7} identity confirmed" },
+        ZtnaEntry { ts: 6, session: "sess_a1b2", actor: "alice@corp.com",
+            event: ZtnaEvent::ResourceAccessed,      detail: "/api/reports/quarterly" },
+        ZtnaEntry { ts: 9, session: "sess_a1b2", actor: "alice@corp.com",
+            event: ZtnaEvent::PrivilegedActionTaken, detail: "export_user_data \u{00b7} scope=quarterly_reports" },
+    ];
+
+    // Rust engine validates the canned stream produces zero variances.
+    let mut engine = ZtnaEngine::new();
+    for entry in &stream {
+        let vs = engine.ingest(entry);
+        assert!(
+            vs.is_empty(),
+            "Canned stream variance at ts={}: {:?}",
+            entry.ts, vs
+        );
+    }
+
+    let stream_js = stream_to_js(&stream);
+    let html      = generate_html(&stream_js);
+
+    std::fs::write("configure.html", &html).expect("cannot write configure.html");
+    println!("Configure demo \u{2192} configure.html");
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", "configure.html"])
+        .spawn()
+        .ok();
+}
