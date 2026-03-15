@@ -1,5 +1,5 @@
 {
-  "buildCommand": "export PATH=/rust/bin:$PATH && cd telemetry-engine && cargo run && mkdir -p ../public && cp dashboard.html ../public/index.html",
+  "buildCommand": "export PATH=/rust/bin:$PATH && cd telemetry-engine && cargo run --bin telemetry-engine && cargo run --bin configure && mkdir -p ../public && cp dashboard.html ../public/index.html && cp configure.html ../public/configure.html",
   "outputDirectory": "public",
   "framework": null
 }
