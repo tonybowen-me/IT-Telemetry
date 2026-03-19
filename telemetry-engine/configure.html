@@ -316,7 +316,7 @@ button:hover{border-color:var(--blue);color:var(--blue)}
         <div class="prereq-hint">Uncheck a box to remove that step from her history &mdash; the system will flag whatever&rsquo;s missing.</div>
 
         <label class="prereq-row" id="row-hb">
-          <input type="checkbox" id="prereq-hb" checked onchange="updatePreview()">
+          <input type="checkbox" id="prereq-hb" checked onchange="onPrereqChange('hb', this.checked)">
           <div class="prereq-story">
             <strong>Had an active connection</strong>
             <small>Her session was confirmed live just moments before</small>
@@ -325,7 +325,7 @@ button:hover{border-color:var(--blue);color:var(--blue)}
         </label>
 
         <label class="prereq-row" id="row-id">
-          <input type="checkbox" id="prereq-id" checked onchange="updatePreview()">
+          <input type="checkbox" id="prereq-id" checked onchange="onPrereqChange('id', this.checked)">
           <div class="prereq-story">
             <strong>Signed in recently</strong>
             <small>She verified her identity within the last 5 minutes</small>
@@ -333,13 +333,14 @@ button:hover{border-color:var(--blue);color:var(--blue)}
           <span class="check-num">&#x2461;</span>
         </label>
 
-        <div class="prereq-row prereq-key" id="row-res">
+        <label class="prereq-row" id="row-res">
+          <input type="checkbox" id="prereq-res" onchange="onPrereqChange('res', this.checked)">
           <div class="prereq-story">
             <strong>Used the system normally first</strong>
-            <small>Automatically detected from the live stream &mdash; fires true once &ldquo;File opened&rdquo; appears this cycle</small>
+            <small>She opened at least one file or resource before attempting the admin action</small>
           </div>
-          <span id="cycle-res-indicator" class="cycle-res-badge badge-no">&#x2718; No file opened yet &mdash; PRIV&#x2011;3 will trigger</span>
-        </div>
+          <span class="check-num">&#x2462;</span>
+        </label>
       </div>
 
       <!-- Live preview -->
@@ -473,6 +474,9 @@ let paused            = false;
 let timer;
 let sessions          = {};
 let cycleResAccessed  = false;  // true once ResourceAccessed fires in the current cycle
+let hbCheckedAt  = Date.now();   // wall time when HB prereq was last enabled (null = unchecked)
+let idCheckedAt  = Date.now();   // wall time when ID prereq was last enabled (null = unchecked)
+let resCheckedAt = null;         // wall time when Res prereq was last enabled (null = unchecked)
 
 // Logs for report
 let feedLog      = []; // all events displayed
@@ -614,20 +618,30 @@ function togglePause() {
 function firePayload() {
   injCount++;
   const sessionId = `atk_${String(injCount).padStart(3,'0')}`;
-  const prereqHb  = document.getElementById('prereq-hb').checked;
-  const prereqId  = document.getElementById('prereq-id').checked;
-  // PRIV-3 uses the live cycle state — not a checkbox —
-  // so the engine reflects what has actually happened in the stream.
-  const prereqRes = cycleResAccessed;
+  const prereqRes = resCheckedAt !== null;
 
   simTs += 1;
-  const ts = simTs;
-
-  const s   = getSession(sessionId);
+  const ts  = simTs;
   const now = Date.now();
-  if (prereqHb)  { s.last_heartbeat_at = ts - 5;  s.last_heartbeat_wall = now - 5000;  }
-  if (prereqId)  { s.last_identity_at  = ts - 10; s.last_identity_wall  = now - 10000; }
-  if (prereqRes) { s.last_resource_at  = ts - 3;  s.last_resource_wall  = now - 3000;  }
+
+  const s = getSession(sessionId);
+  // Use the actual wall time from when each checkbox was enabled so the engine
+  // sees the same elapsed time as the preview — if the window expired, PRIV-1/2 fires.
+  if (hbCheckedAt !== null) {
+    const age = Math.round((now - hbCheckedAt) / 1000);
+    s.last_heartbeat_at   = ts - age;
+    s.last_heartbeat_wall = hbCheckedAt;
+  }
+  if (idCheckedAt !== null) {
+    const age = Math.round((now - idCheckedAt) / 1000);
+    s.last_identity_at   = ts - age;
+    s.last_identity_wall = idCheckedAt;
+  }
+  if (prereqRes) { s.last_resource_at = ts - 3; s.last_resource_wall = now - 3000; }
+
+  // Reflect actual freshness at fire time for logging
+  const prereqHb = hbCheckedAt !== null && (now - hbCheckedAt) / 1000 <= HEARTBEAT_WINDOW;
+  const prereqId = idCheckedAt !== null && (now - idCheckedAt) / 1000 <= IDENTITY_WINDOW;
 
   const entry = {
     ts, session: sessionId, actor: 'eve@external.com',
@@ -660,12 +674,24 @@ function firePayload() {
 }
 
 // ═══════════════════════════════════════════════════
+// PREREQ TRACKING
+// ═══════════════════════════════════════════════════
+function onPrereqChange(which, checked) {
+  if (which === 'hb')  hbCheckedAt  = checked ? Date.now() : null;
+  if (which === 'id')  idCheckedAt  = checked ? Date.now() : null;
+  if (which === 'res') resCheckedAt = checked ? Date.now() : null;
+  updatePreview();
+}
+
+// ═══════════════════════════════════════════════════
 // LIVE PREVIEW
 // ═══════════════════════════════════════════════════
 function updatePreview() {
-  const hb  = document.getElementById('prereq-hb').checked;
-  const id  = document.getElementById('prereq-id').checked;
-  const res = cycleResAccessed;  // driven by the live stream, not a checkbox
+  const hbAge = hbCheckedAt !== null ? (Date.now() - hbCheckedAt) / 1000 : null;
+  const idAge = idCheckedAt !== null ? (Date.now() - idCheckedAt) / 1000 : null;
+  const hb  = hbAge !== null && hbAge <= HEARTBEAT_WINDOW;
+  const id  = idAge !== null && idAge <= IDENTITY_WINDOW;
+  const res = resCheckedAt !== null;
 
   const checks = [
     { label: 'Had an active connection',  pass: hb  },
@@ -992,7 +1018,7 @@ updatePreview();
 updateStatePanel();
 tick();
 timer = setInterval(tick, 3000);
-setInterval(() => { updateChecksPanel('sess_a1b2'); updateStatePanel(); }, 1000);
+setInterval(() => { updateChecksPanel('sess_a1b2'); updateStatePanel(); updatePreview(); }, 1000);
 document.getElementById('pulse-dot').classList.add('pulse-active');
 </script>
 </body>
