@@ -120,13 +120,18 @@ fn generate_html(stream_js: &str) -> String {
 
       <div class="prereq-section">
         <div class="prereq-header">What did Eve do before trying to export?</div>
-        <div class="prereq-hint">Uncheck a box to remove that step from her history &mdash; the system will flag whatever&rsquo;s missing.</div>
+        <div class="prereq-hint">Uncheck to remove a step entirely. Use the slider to set how stale Eve&rsquo;s credentials are &mdash; drag past the boundary to watch the check flip.</div>
 
         <label class="prereq-row" id="row-hb">
           <input type="checkbox" id="prereq-hb" checked onchange="onPrereqChange('hb', this.checked)">
           <div class="prereq-story">
             <strong>Had an active connection</strong>
-            <small>Her session was confirmed live just moments before</small>
+            <div class="staleness-wrap" id="hb-staleness-wrap">
+              <input type="range" id="hb-staleness" min="0" max="90" step="1" value="5"
+                     oninput="onStalenessChange('hb', this.value)">
+              <span class="staleness-val sv-ok" id="hb-staleness-val">5s ago</span>
+              <span class="staleness-limit">window: 30s</span>
+            </div>
           </div>
           <span class="check-num">&#x2460;</span>
         </label>
@@ -135,7 +140,12 @@ fn generate_html(stream_js: &str) -> String {
           <input type="checkbox" id="prereq-id" checked onchange="onPrereqChange('id', this.checked)">
           <div class="prereq-story">
             <strong>Signed in recently</strong>
-            <small>She verified her identity within the last 5 minutes</small>
+            <div class="staleness-wrap" id="id-staleness-wrap">
+              <input type="range" id="id-staleness" min="0" max="600" step="5" value="10"
+                     oninput="onStalenessChange('id', this.value)">
+              <span class="staleness-val sv-ok" id="id-staleness-val">10s ago</span>
+              <span class="staleness-limit">window: 5 min</span>
+            </div>
           </div>
           <span class="check-num">&#x2461;</span>
         </label>
@@ -276,9 +286,11 @@ let paused            = false;
 let timer;
 let sessions          = {{}};
 let cycleResAccessed  = false;  // true once ResourceAccessed fires in the current cycle
-let hbCheckedAt  = Date.now();   // wall time when HB prereq was last enabled (null = unchecked)
-let idCheckedAt  = Date.now();   // wall time when ID prereq was last enabled (null = unchecked)
-let resCheckedAt = null;         // wall time when Res prereq was last enabled (null = unchecked)
+let hbEnabled    = true;   // HB prereq present at all
+let hbStaleness  = 5;      // seconds since Eve's last heartbeat
+let idEnabled    = true;   // ID prereq present at all
+let idStaleness  = 10;     // seconds since Eve's last identity verification
+let resCheckedAt = null;   // wall time when Res prereq was last enabled (null = unchecked)
 
 // Logs for report
 let feedLog      = []; // all events displayed
@@ -427,23 +439,18 @@ function firePayload() {{
   const now = Date.now();
 
   const s = getSession(sessionId);
-  // Use the actual wall time from when each checkbox was enabled so the engine
-  // sees the same elapsed time as the preview — if the window expired, PRIV-1/2 fires.
-  if (hbCheckedAt !== null) {{
-    const age = Math.round((now - hbCheckedAt) / 1000);
-    s.last_heartbeat_at   = ts - age;
-    s.last_heartbeat_wall = hbCheckedAt;
+  if (hbEnabled) {{
+    s.last_heartbeat_at   = ts - hbStaleness;
+    s.last_heartbeat_wall = now - hbStaleness * 1000;
   }}
-  if (idCheckedAt !== null) {{
-    const age = Math.round((now - idCheckedAt) / 1000);
-    s.last_identity_at   = ts - age;
-    s.last_identity_wall = idCheckedAt;
+  if (idEnabled) {{
+    s.last_identity_at   = ts - idStaleness;
+    s.last_identity_wall = now - idStaleness * 1000;
   }}
   if (prereqRes) {{ s.last_resource_at = ts - 3; s.last_resource_wall = now - 3000; }}
 
-  // Reflect actual freshness at fire time for logging
-  const prereqHb = hbCheckedAt !== null && (now - hbCheckedAt) / 1000 <= HEARTBEAT_WINDOW;
-  const prereqId = idCheckedAt !== null && (now - idCheckedAt) / 1000 <= IDENTITY_WINDOW;
+  const prereqHb = hbEnabled && hbStaleness <= HEARTBEAT_WINDOW;
+  const prereqId = idEnabled && idStaleness <= IDENTITY_WINDOW;
 
   const entry = {{
     ts, session: sessionId, actor: 'eve@external.com',
@@ -479,9 +486,38 @@ function firePayload() {{
 // PREREQ TRACKING
 // ═══════════════════════════════════════════════════
 function onPrereqChange(which, checked) {{
-  if (which === 'hb')  hbCheckedAt  = checked ? Date.now() : null;
-  if (which === 'id')  idCheckedAt  = checked ? Date.now() : null;
+  if (which === 'hb') {{
+    hbEnabled = checked;
+    document.getElementById('hb-staleness-wrap').style.opacity = checked ? '1' : '0.3';
+    document.getElementById('hb-staleness').disabled = !checked;
+  }}
+  if (which === 'id') {{
+    idEnabled = checked;
+    document.getElementById('id-staleness-wrap').style.opacity = checked ? '1' : '0.3';
+    document.getElementById('id-staleness').disabled = !checked;
+  }}
   if (which === 'res') resCheckedAt = checked ? Date.now() : null;
+  updatePreview();
+}}
+
+function onStalenessChange(which, rawVal) {{
+  const val = parseInt(rawVal);
+  if (which === 'hb') {{
+    hbStaleness = val;
+    const ok = val <= HEARTBEAT_WINDOW;
+    const el = document.getElementById('hb-staleness-val');
+    el.textContent = val + 's ago';
+    el.className   = 'staleness-val ' + (ok ? 'sv-ok' : 'sv-fail');
+  }}
+  if (which === 'id') {{
+    idStaleness = val;
+    const ok  = val <= IDENTITY_WINDOW;
+    const el  = document.getElementById('id-staleness-val');
+    const min = Math.floor(val / 60);
+    const sec = val % 60;
+    el.textContent = min > 0 ? (min + 'm ' + (sec > 0 ? sec + 's ' : '') + 'ago') : (val + 's ago');
+    el.className   = 'staleness-val ' + (ok ? 'sv-ok' : 'sv-fail');
+  }}
   updatePreview();
 }}
 
@@ -489,10 +525,8 @@ function onPrereqChange(which, checked) {{
 // LIVE PREVIEW
 // ═══════════════════════════════════════════════════
 function updatePreview() {{
-  const hbAge = hbCheckedAt !== null ? (Date.now() - hbCheckedAt) / 1000 : null;
-  const idAge = idCheckedAt !== null ? (Date.now() - idCheckedAt) / 1000 : null;
-  const hb  = hbAge !== null && hbAge <= HEARTBEAT_WINDOW;
-  const id  = idAge !== null && idAge <= IDENTITY_WINDOW;
+  const hb  = hbEnabled && hbStaleness <= HEARTBEAT_WINDOW;
+  const id  = idEnabled && idStaleness <= IDENTITY_WINDOW;
   const res = resCheckedAt !== null;
 
   const checks = [
@@ -671,8 +705,8 @@ function showFinding(vs, passed) {{
   if (passed) {{
     bar.className  = 'finding-bar finding-pass';
     icon.textContent = '\u2714';
-    headline.textContent = 'Behavior looks normal';
-    story.textContent = 'Eve had an active connection, had signed in recently, and had already opened files in this session. All three checks passed \u2014 the admin action is causally justified. This is what legitimate admin behavior looks like.';
+    headline.textContent = 'Causal Chain Intact';
+    story.textContent = 'Eve had an active connection, had signed in recently, and had already opened files in this session. All three causal prerequisites were satisfied \u2014 the admin action is causally justified.';
     checks.innerHTML = '';
     tech.innerHTML = '<span class="tech-tag">PRIV-1 \u2714</span><span class="tech-tag">PRIV-2 \u2714</span><span class="tech-tag">PRIV-3 \u2714</span>';
   }} else {{
@@ -772,7 +806,7 @@ tr:nth-child(even) td{{background:#f8fafc}}
 <div class="stat-row">
   <div class="stat"><div class="stat-n">${{totalEvs}}</div><div class="stat-l">Events observed</div></div>
   <div class="stat"><div class="stat-n ok">${{alicePriv.length}}</div><div class="stat-l">Legitimate admin actions</div></div>
-  <div class="stat"><div class="stat-n flag">${{attacks.length}}</div><div class="stat-l">Suspicious behaviors</div></div>
+  <div class="stat"><div class="stat-n flag">${{attacks.length}}</div><div class="stat-l">Causal violations</div></div>
   <div class="stat"><div class="stat-n warn">${{cleanRuns.length}}</div><div class="stat-l">Simulations that passed</div></div>
 </div>
 
@@ -786,23 +820,23 @@ tr:nth-child(even) td{{background:#f8fafc}}
   <tbody>${{aliceTimeline}}</tbody>
 </table>
 
-<h2>Suspicious behavior${{attacks.length !== 1 ? 's' : ''}} detected &mdash; ${{attacks.length}} finding${{attacks.length !== 1 ? 's' : ''}}</h2>
+<h2>Causal violation${{attacks.length !== 1 ? 's' : ''}} detected &mdash; ${{attacks.length}} finding${{attacks.length !== 1 ? 's' : ''}}</h2>
 ${{attackRows}}
 
 ${{cleanRuns.length > 0 ? `<h2>Simulations that passed (${{cleanRuns.length}})</h2>
 <p style="font-size:11px;color:#475569">
   ${{cleanRuns.length}} simulation${{cleanRuns.length!==1?'s were':' was'}} run with all prerequisites present.
   The system correctly allowed those actions &mdash; demonstrating that this engine does not block everything,
-  only the behaviors that break the causal chain.
+  only the actions that break the causal chain.
 </p>` : ''}}
 
 <div class="how-it-works">
   <strong>How this detection works</strong>
   This system does not use passwords, firewall rules, IP reputation, or machine learning.
-  It asks one question: <em>&ldquo;Does this behavior follow the exact sequence that real users always follow?&rdquo;</em>
+  It asks one question: <em>&ldquo;Does this action satisfy the causal prerequisites that every legitimate action requires?&rdquo;</em>
   Every legitimate admin action is preceded by an active connection, a recent login, and normal resource usage.
-  When any of those steps are missing, the system flags it &mdash; regardless of whether the credentials are valid.
-  This catches attackers who have stolen valid passwords but cannot replicate the behavioral history of a real user.
+  When any of those prerequisites are missing, the system flags a causal violation &mdash; regardless of whether the credentials are valid.
+  This catches attackers who have stolen valid passwords but cannot replicate the causal history of a real user session.
 </div>
 </body></html>`;
 
@@ -978,6 +1012,13 @@ button:hover{border-color:var(--blue);color:var(--blue)}
 .check-num{font-size:.75rem;flex-shrink:0;color:var(--muted)}
 .warn-num{color:var(--priv)!important}
 .prereq-missing{background:rgba(255,51,85,.05)!important;border-color:rgba(255,51,85,.2)!important}
+.staleness-wrap{display:flex;align-items:center;gap:.5rem;margin-top:.3rem}
+.staleness-wrap input[type=range]{flex:1;height:3px;accent-color:var(--blue);cursor:pointer;min-width:0}
+.staleness-wrap input[type=range]:disabled{opacity:.3;cursor:default}
+.staleness-val{font-size:.6rem;font-weight:700;min-width:3.5rem;text-align:right;transition:color .15s}
+.sv-ok{color:var(--green)}
+.sv-fail{color:var(--red)}
+.staleness-limit{font-size:.57rem;color:var(--muted);white-space:nowrap}
 
 .preview-section{background:var(--faint);border:1px solid var(--border);border-radius:6px;
   padding:.65rem .75rem}
