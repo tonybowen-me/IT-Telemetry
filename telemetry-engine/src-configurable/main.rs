@@ -206,7 +206,7 @@ fn generate_html(stream_js: &str) -> String {
       <div class="inv-card inv-key" id="inv-priv3">
         <div class="inv-num">Check &#x2462;</div>
         <div class="inv-q">Did they use the system first?</div>
-        <div class="inv-explain">The actor must have opened at least one file or resource before taking an admin action. Skipping this step &mdash; going straight to the vault &mdash; is the tell-tale sign of cold privilege escalation.</div>
+        <div class="inv-explain">The actor must have opened at least one file or resource before taking an admin action.</div>
         <div class="inv-rule-small">PRIV-3 &middot; Prior ResourceAccessed required</div>
         <div class="inv-status" id="inv-priv3-status"></div>
       </div>
