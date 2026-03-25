@@ -353,7 +353,7 @@ button:hover{border-color:var(--blue);color:var(--blue)}
         <label class="prereq-row" id="row-res">
           <input type="checkbox" id="prereq-res" onchange="onPrereqChange('res', this.checked)">
           <div class="prereq-story">
-            <strong>Used the system normally first</strong>
+            <strong>System leveraged under valid utilization mechanisms</strong>
             <small>She opened at least one file or resource before attempting the admin action</small>
           </div>
           <span class="check-num">&#x2462;</span>
@@ -475,7 +475,7 @@ const CHECK_STORY = {
     short: 'Identity window expired',
   },
   'PRIV-3': {
-    headline: 'Went straight to admin \u2014 skipped normal usage',
+    headline: 'Went straight to admin \u2014 skipped valid usage',
     story: "This actor jumped directly to the most sensitive action available without ever opening a single file first. Real users always browse or access resources before escalating to admin actions. Going straight to the vault is the signature of a cold privilege escalation attack.",
     short: 'No prior resource access in this session',
   },
@@ -794,7 +794,7 @@ function addFeedEntry(entry, ts, variances, injected) {
         <div class="feed-label ${isPriv ? 'feed-label-priv' : ''}">${label}${injected ? ' <span class="inj-tag">SIMULATED</span>' : ''}</div>
         <div class="feed-desc">${desc}</div>
       </div>
-      ${isPriv && !injected && variances.length === 0 ? '<span class="feed-ok-badge">\u2714 Normal</span>' : ''}
+      ${isPriv && !injected && variances.length === 0 ? '<span class="feed-ok-badge">\u2714 Valid</span>' : ''}
     </div>`;
 
   let violHtml = '';
@@ -851,7 +851,7 @@ function updateStatePanel() {
           <div class="sc-name">${isAtk ? 'Eve (simulated attack)' : 'Alice (live session)'}</div>
           <div class="sc-id">${id}</div>
         </div>
-        <span class="sc-badge ${isAtk ? 'sc-badge-atk' : 'sc-badge-ok'}">${isAtk ? 'SIMULATED' : 'NORMAL'}</span>
+        <span class="sc-badge ${isAtk ? 'sc-badge-atk' : 'sc-badge-ok'}">${isAtk ? 'SIMULATED' : 'VALID'}</span>
       </div>
       ${row('\u2665', 'Connection active',  hbOk, hbSecs !== null ? `${hbSecs.toFixed(0)}s ago` : null, 'no heartbeat seen')}
       ${row('\u2713', 'Signed in',          idOk, idSecs !== null ? `${idSecs.toFixed(0)}s ago` : null, 'not signed in')}
@@ -1039,7 +1039,7 @@ ${cleanRuns.length > 0 ? `<h2>Simulations that passed (${cleanRuns.length})</h2>
   <strong>How this detection works</strong>
   This system does not use passwords, firewall rules, IP reputation, or machine learning.
   It asks one question: <em>&ldquo;Does this action satisfy the causal prerequisites that every legitimate action requires?&rdquo;</em>
-  Every legitimate admin action is preceded by an active connection, a recent login, and normal resource usage.
+  Every legitimate admin action is preceded by an active connection, a recent login, and valid resource usage.
   When any of those prerequisites are missing, the system flags a causal violation &mdash; regardless of whether the credentials are valid.
   This catches attackers who have stolen valid passwords but cannot replicate the causal history of a real user session.
 </div>
