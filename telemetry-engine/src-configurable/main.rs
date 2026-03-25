@@ -153,7 +153,7 @@ fn generate_html(stream_js: &str) -> String {
         <label class="prereq-row" id="row-res">
           <input type="checkbox" id="prereq-res" onchange="onPrereqChange('res', this.checked)">
           <div class="prereq-story">
-            <strong>System used unde</strong>
+            <strong>System accessed before escalated action occurred</strong>
             <small>She opened at least one file or resource before attempting the admin action</small>
           </div>
           <span class="check-num">&#x2462;</span>
